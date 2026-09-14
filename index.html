@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -92,8 +91,8 @@ async function fetchFromYahoo(sym) {
   if (lines.length < 21) throw new Error("कम data मिला");
   return { csv: lines.join("\n"), name: "NSE:" + clean };
 }
+
 async function fetchFromSheet(url) {
-  // पहले direct try करो (Google Sheets published CSV CORS support करता है)
   try {
     const direct = await fetch(url);
     if (direct.ok) {
@@ -101,11 +100,8 @@ async function fetchFromSheet(url) {
       if (text.indexOf("Date") !== -1) return { csv: text, name: "" };
     }
   } catch (e) {}
-  // अगर direct fail हो, तो proxy try करो
   const text = await fetchViaProxy(url);
-  if (text.indexOf("Date") === -1) throw new Error("Sheet में Date column नहीं मिला — published CSV URL सही है?");
-  return { csv: text, name: "" };
-}
+  if (text.indexOf("Date") === -1) throw new Error("Sheet में Date column नहीं मिला");
   return { csv: text, name: "" };
 }
 
@@ -308,7 +304,7 @@ function App() {
     try { localStorage.setItem(SHEET_URL_KEY, u); } catch(e) {}
   }
 
-  function handleAdd(csvRaw, lbl, replace) {
+  function handleAdd(csvRaw, lbl) {
     setErr("");
     var parsed = parseCSV(csvRaw);
     if (parsed.error) { setErr(parsed.error); return false; }
@@ -335,11 +331,6 @@ function App() {
     if (handleAdd(csvTxt, fullName)) { setCsvTxt(""); setLabel(""); setModal(false); }
   }
 
-  function loadSample() {
-    setErr(""); setLoading("NTPC का data ला रहे हैं...");
-    fetchFromYahoo("NTPC").then(function(r){ handleAdd(r.csv, r.name); }).catch(function(e){ setErr("❌ " + e.message); }).finally(function(){ setLoading(""); });
-  }
-
   function directLoad() {
     if (!label || !label.trim()) { setErr("पहले stock चुनें"); return; }
     setErr(""); setLoading(label + " का data ला रहे हैं...");
@@ -350,7 +341,7 @@ function App() {
   }
 
   function loadFromSheet() {
-    if (!sheetUrl || !sheetUrl.trim()) { setErr("पहले Sheet की published CSV URL paste करें"); return; }
+    if (!sheetUrl || !sheetUrl.trim()) { setErr("पहले Sheet की URL paste करें"); return; }
     setErr(""); setLoading("Google Sheet से data ला रहे हैं...");
     fetchFromSheet(sheetUrl.trim()).then(function(r){
       var ok = handleAdd(r.csv, "");
@@ -407,7 +398,7 @@ function App() {
         <div style={{ fontSize:52 }}>📊</div>
         <div>
           <div style={{ fontWeight:700, fontSize:20, marginBottom:6 }}>GTT Backtest शुरू करें</div>
-          <div style={{ color:C.muted, fontSize:13 }}>Google Sheet link करो — sheet में stock बदलो, app में एक tap</div>
+          <div style={{ color:C.muted, fontSize:13 }}>Google Sheet link करो, या Yahoo से auto data</div>
         </div>
         <div style={{ display:"flex", gap:10, flexWrap:"wrap", justifyContent:"center" }}>
           <button onClick={function(){ setModal(true); }} disabled={!!loading}
@@ -416,7 +407,7 @@ function App() {
           </button>
           {sheetUrl && <button onClick={loadFromSheet} disabled={!!loading}
             style={{ background:"#16a34a", color:"#fff", border:"none", borderRadius:10, padding:"11px 22px", fontSize:14, fontWeight:600, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
-            {loading ? "⏳ Load हो रहा है..." : "🔄 Sheet से Load करो"}
+            {loading ? "⏳ Load हो रहा है..." : "🔄 Sheet से Load"}
           </button>}
         </div>
         {err && <div style={{ color:"#f87171", fontSize:12, maxWidth:400 }}>{err}</div>}
@@ -450,7 +441,7 @@ function App() {
           <span style={{ fontSize:11, color:C.muted }}>Status ({fmtD(last.date)}):</span>
           {s.openPosition && <span style={{ background:"#04130b", color:C.buy, border:"1px solid #166534", borderRadius:6, padding:"3px 10px", fontSize:12, fontWeight:700 }}>📈 HOLDING @ ₹{fmtN(s.openPosition.entry)} — Target ₹{fmtN(s.openPosition.target)}</span>}
           {!s.openPosition && s.pendingGtt && <span style={{ background:"#1c1407", color:C.gtt, border:"1px solid #78350f", borderRadius:6, padding:"3px 10px", fontSize:12, fontWeight:700 }}>🔔 GTT PENDING @ ₹{fmtN(s.pendingGtt.price)}</span>}
-          {!s.openPosition && !s.pendingGtt && <span style={{ color:C.muted, fontSize:12 }}>⏳ IDLE — नए 20D low का इंतज़ार</span>}
+          {!s.openPosition && !s.pendingGtt && <span style={{ color:C.muted, fontSize:12 }}>⏳ IDLE</span>}
         </div>}
         <div style={{ padding:"0 16px 12px", display:"flex", gap:6, overflowX:"auto" }}>
           {views.map(function(v){
@@ -550,25 +541,22 @@ function App() {
           <div style={{ fontWeight:700, fontSize:16, marginBottom:18 }}>📥 Stock Add करें</div>
 
           <div style={{ background:"#052e16", border:"1px solid #166534", borderRadius:10, padding:"12px 14px", marginBottom:14 }}>
-            <div style={{ fontSize:12, color:"#86efac", fontWeight:700, marginBottom:8 }}>🔗 Google Sheet से (Recommended)</div>
+            <div style={{ fontSize:12, color:"#86efac", fontWeight:700, marginBottom:8 }}>🔗 Google Sheet से</div>
             <input
               value={sheetUrl}
               onChange={function(e){ saveSheetUrl(e.target.value); }}
-              placeholder="Sheet की published CSV URL paste करें"
+              placeholder="Sheet की published CSV URL"
               style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:11, fontFamily:"monospace", boxSizing:"border-box", marginBottom:10, outline:"none" }} />
             <button onClick={loadFromSheet} disabled={!!loading}
               style={{ width:"100%", background:"#16a34a", color:"#fff", border:"none", borderRadius:8, padding:11, fontSize:14, fontWeight:700, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
               {loading ? "⏳ " + loading : "🔄 Sheet से Load करो"}
             </button>
-            <div style={{ fontSize:10, color:"#86efac", marginTop:8, lineHeight:1.6 }}>
-              💡 Sheet में stock बदलो → यह button दबाओ → नया data आ जाएगा
-            </div>
           </div>
 
           <div style={{ textAlign:"center", fontSize:11, color:C.muted, marginBottom:12 }}>─── या ───</div>
 
-          <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>📥 Yahoo Finance से (auto data)</label>
-          <input list="nifty200-list" value={label} onChange={function(e){ setLabel(e.target.value); }} placeholder="Stock चुनें (जैसे: RELIANCE)"
+          <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>📥 Yahoo से (auto)</label>
+          <input list="nifty200-list" value={label} onChange={function(e){ setLabel(e.target.value); }} placeholder="Stock चुनें"
             style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:14, boxSizing:"border-box", marginBottom:10, outline:"none" }} />
           <datalist id="nifty200-list">
             {NIFTY200.map(function(stk){ return <option key={stk.sym} value={stk.sym}>{stk.sym} — {stk.name}</option>; })}
@@ -580,11 +568,10 @@ function App() {
 
           <div style={{ textAlign:"center", fontSize:11, color:C.muted, marginBottom:12 }}>─── या manual ───</div>
 
-          <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>CSV File Upload</label>
           <input type="file" accept=".csv,.txt" onChange={onFile}
             style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:13, boxSizing:"border-box", marginBottom:10 }} />
           <textarea value={csvTxt} onChange={function(e){ setCsvTxt(e.target.value); }} rows={4}
-            placeholder={"Date,Open,High,Low,Close,Volume\n..."}
+            placeholder={"Date,Open,High,Low,Close,Volume"}
             style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:11, fontFamily:"monospace", resize:"vertical", boxSizing:"border-box", marginBottom:10, outline:"none" }} />
 
           {err && <div style={{ color:"#f87171", background:"rgba(239,68,68,.1)", border:"1px solid rgba(239,68,68,.3)", borderRadius:8, padding:"8px 12px", fontSize:12, marginBottom:12 }}>{err}</div>}
@@ -593,7 +580,7 @@ function App() {
             <button onClick={function(){ setModal(false); setErr(""); setCsvTxt(""); setLabel(""); }}
               style={{ flex:1, background:C.border, color:C.text, border:"none", borderRadius:10, padding:12, fontSize:14, cursor:"pointer" }}>Cancel</button>
             <button onClick={submitAdd}
-              style={{ flex:2, background:C.accent, color:"#fff", border:"none", borderRadius:10, padding:12, fontSize:14, fontWeight:700, cursor:"pointer" }}>✅ Manual CSV चलाओ</button>
+              style={{ flex:2, background:C.accent, color:"#fff", border:"none", borderRadius:10, padding:12, fontSize:14, fontWeight:700, cursor:"pointer" }}>✅ Manual CSV</button>
           </div>
         </div>
       </div>}
