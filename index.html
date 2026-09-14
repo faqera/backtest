@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -16,40 +17,62 @@
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useMemo } = React;
-
+const { useState } = React;
 const PERIOD = 20;
 const EPS = 0.03;
 const TARGET_PCT = 0.0628;
+const SHEET_URL_KEY = "backtest_sheet_url";
 
 function fmtD(d) {
   if (!d) return "—";
   return d.toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"2-digit" });
 }
-function fmtN(v, dec=2) {
+function fmtN(v, dec) {
   if (v == null || isNaN(v)) return "—";
-  return Number(v).toFixed(dec);
+  return Number(v).toFixed(dec == null ? 2 : dec);
+}
+
+function parseDateCell(s) {
+  if (s == null) return null;
+  const str = String(s).trim();
+  if (!str) return null;
+  if (str.indexOf("/") === -1 && str.indexOf("-") === -1 && str.indexOf(":") === -1) {
+    const n = parseFloat(str);
+    if (!isNaN(n) && n > 25000 && n < 100000) {
+      const ms = (n - 25569) * 86400 * 1000;
+      const d = new Date(ms);
+      if (!isNaN(d.getTime())) return d;
+    }
+  }
+  const d = new Date(str);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+async function fetchViaProxy(url) {
+  const proxies = [
+    "https://corsproxy.io/?url=" + encodeURIComponent(url),
+    "https://api.allorigins.win/raw?url=" + encodeURIComponent(url),
+    "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(url),
+  ];
+  let lastErr = "";
+  for (let i = 0; i < proxies.length; i++) {
+    try {
+      const res = await fetch(proxies[i]);
+      if (!res.ok) { lastErr = "HTTP " + res.status; continue; }
+      const text = await res.text();
+      if (text && text.length > 50) return text;
+    } catch (e) { lastErr = e.message; }
+  }
+  throw new Error("Data नहीं मिला (" + lastErr + ")");
 }
 
 async function fetchFromYahoo(sym) {
   const clean = String(sym).toUpperCase().replace(/^NSE:/, "").trim();
   const ySym = clean + ".NS";
   const yUrl = "https://query1.finance.yahoo.com/v8/finance/chart/" + ySym + "?interval=1d&range=1y";
-  const proxies = [
-    "https://corsproxy.io/?url=" + encodeURIComponent(yUrl),
-    "https://api.allorigins.win/raw?url=" + encodeURIComponent(yUrl),
-    "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(yUrl),
-  ];
-  let json = null, lastErr = "";
-  for (const p of proxies) {
-    try {
-      const res = await fetch(p);
-      if (!res.ok) { lastErr = "HTTP " + res.status; continue; }
-      json = await res.json();
-      break;
-    } catch (e) { lastErr = e.message; }
-  }
-  if (!json) throw new Error("Data नहीं मिला (" + lastErr + ")");
+  const text = await fetchViaProxy(yUrl);
+  let json;
+  try { json = JSON.parse(text); } catch (e) { throw new Error("Yahoo response गलत"); }
   const r = json && json.chart && json.chart.result && json.chart.result[0];
   if (!r) throw new Error("Symbol गलत है या NSE पर listed नहीं");
   const ts = r.timestamp || [];
@@ -66,22 +89,28 @@ async function fetchFromYahoo(sym) {
     if (o == null || h == null || l == null || c == null) continue;
     lines.push(ds + "," + o + "," + h + "," + l + "," + c + "," + (v || 0));
   }
-  if (lines.length < 21) throw new Error("कम data मिला (" + (lines.length - 1) + " rows)");
+  if (lines.length < 21) throw new Error("कम data मिला");
   return { csv: lines.join("\n"), name: "NSE:" + clean };
+}
+
+async function fetchFromSheet(url) {
+  const text = await fetchViaProxy(url);
+  if (text.indexOf("Date") === -1) throw new Error("Sheet में Date column नहीं मिला — published CSV URL सही है?");
+  return { csv: text, name: "" };
 }
 
 function parseCSV(raw) {
   if (!raw || !raw.trim()) return { error: "CSV खाली है।" };
-  const lines = raw.trim().split("\n").map(l => l.trim()).filter(Boolean);
+  const lines = raw.trim().split("\n").map(function(l){ return l.trim(); }).filter(Boolean);
   let stockName = "", hIdx = -1;
-  for (let i = 0; i < Math.min(lines.length, 10); i++) {
+  for (let i = 0; i < Math.min(lines.length, 12); i++) {
     if (/^date/i.test(lines[i])) { hIdx = i; break; }
     const p = lines[i].split(",");
     const cell = p[0] ? p[0].trim() : "";
-    if (cell && !/^\d/.test(cell) && !/\*/.test(cell) && cell.length > 1) stockName = cell;
+    if (cell && !/^\d/.test(cell) && !/\*/.test(cell) && cell.length > 1 && cell.toUpperCase() !== "STOCK") stockName = cell;
   }
   if (hIdx === -1) return { error: 'Header row "Date,Open,High,Low,Close" नहीं मिला।' };
-  const hdr = lines[hIdx].split(",").map(h => h.trim().toLowerCase());
+  const hdr = lines[hIdx].split(",").map(function(h){ return h.trim().toLowerCase(); });
   const gi = function() {
     for (let j = 0; j < arguments.length; j++) {
       const x = hdr.indexOf(arguments[j]);
@@ -90,15 +119,15 @@ function parseCSV(raw) {
     return -1;
   };
   const di=gi("date","datetime","time"), oi=gi("open"), hi=gi("high"), li=gi("low"), ci=gi("close"), vi=gi("volume","vol");
-  if ([di,hi,li].some(x => x < 0)) return { error: "Date / High / Low columns नहीं मिले।" };
+  if ([di,hi,li].some(function(x){ return x < 0; })) return { error: "Date / High / Low columns नहीं मिले।" };
   const rows = [];
   for (let i = hIdx+1; i < lines.length; i++) {
     const p = lines[i].split(",");
     if (p.length < 4) continue;
     const ds = p[di] ? p[di].trim() : "";
     if (!ds) continue;
-    const d = new Date(ds);
-    if (isNaN(d.getTime())) continue;
+    const d = parseDateCell(ds);
+    if (!d) continue;
     const high  = parseFloat(p[hi]);
     const low   = parseFloat(p[li]);
     const close = ci>=0 ? parseFloat(p[ci]) : high;
@@ -107,17 +136,17 @@ function parseCSV(raw) {
     if (isNaN(high) || isNaN(low)) continue;
     rows.push({ date: d, open: open, high: high, low: low, close: close, vol: vol, ts: d.getTime() });
   }
-  rows.sort((a,b) => a.ts - b.ts);
+  rows.sort(function(a,b){ return a.ts - b.ts; });
   if (rows.length < PERIOD) return { error: "कम से कम " + PERIOD + " rows चाहिए। मिले: " + rows.length };
   return { stockName: stockName, rows: rows };
 }
 
 function calcSignals(rows) {
-  const enriched = rows.map((r, i) => {
+  const enriched = rows.map(function(r, i) {
     if (i < PERIOD - 1) return Object.assign({}, r, { d20L: null, d20H: null, prevD20H: null, newLow: false, events: [], gttPrice: null });
     const win = rows.slice(i - PERIOD + 1, i + 1);
-    const d20L = Math.min.apply(null, win.map(x => x.low));
-    const d20H = Math.max.apply(null, win.map(x => x.high));
+    const d20L = Math.min.apply(null, win.map(function(x){ return x.low; }));
+    const d20H = Math.max.apply(null, win.map(function(x){ return x.high; }));
     return Object.assign({}, r, { d20L: d20L, d20H: d20H, prevD20H: null, newLow: r.low <= d20L + EPS, events: [], gttPrice: null });
   });
   for (let i = 1; i < enriched.length; i++) {
@@ -174,7 +203,7 @@ function calcSignals(rows) {
 }
 
 const NIFTY200 = [
-  {sym:"ABB",name:"ABB India"},{sym:"ABCAPITAL",name:"Aditya Birla Capital"},{sym:"ABFRL",name:"Aditya Birla Fashion"},{sym:"ADANIENT",name:"Adani Enterprises"},{sym:"ADANIENSOL",name:"Adani Energy Solutions"},{sym:"ADANIGREEN",name:"Adani Green Energy"},{sym:"ADANIPORTS",name:"Adani Ports"},{sym:"ADANIPOWER",name:"Adani Power"},{sym:"ALKEM",name:"Alkem Labs"},{sym:"AMBUJACEM",name:"Ambuja Cements"},{sym:"APOLLOHOSP",name:"Apollo Hospitals"},{sym:"APOLLOTYRE",name:"Apollo Tyres"},{sym:"ASHOKLEY",name:"Ashok Leyland"},{sym:"ASIANPAINT",name:"Asian Paints"},{sym:"ASTRAL",name:"Astral"},{sym:"ATUL",name:"Atul"},{sym:"ATGL",name:"Adani Total Gas"},{sym:"AUROPHARMA",name:"Aurobindo Pharma"},{sym:"AWL",name:"Adani Wilmar"},{sym:"AXISBANK",name:"Axis Bank"},{sym:"BAJAJ-AUTO",name:"Bajaj Auto"},{sym:"BAJAJFINSV",name:"Bajaj Finserv"},{sym:"BAJAJHLDNG",name:"Bajaj Holdings"},{sym:"BAJFINANCE",name:"Bajaj Finance"},{sym:"BALKRISIND",name:"Balkrishna Industries"},{sym:"BANDHANBNK",name:"Bandhan Bank"},{sym:"BANKBARODA",name:"Bank of Baroda"},{sym:"BEL",name:"Bharat Electronics"},{sym:"BERGEPAINT",name:"Berger Paints"},{sym:"BHARTIARTL",name:"Bharti Airtel"},{sym:"BHEL",name:"BHEL"},{sym:"BIOCON",name:"Biocon"},{sym:"BOSCHLTD",name:"Bosch"},{sym:"BPCL",name:"BPCL"},{sym:"BRITANNIA",name:"Britannia"},{sym:"BSE",name:"BSE"},{sym:"CANBK",name:"Canara Bank"},{sym:"CDSL",name:"CDSL"},{sym:"CESC",name:"CESC"},{sym:"CGPOWER",name:"CG Power"},{sym:"CHOLAFIN",name:"Cholamandalam"},{sym:"CIPLA",name:"Cipla"},{sym:"COALINDIA",name:"Coal India"},{sym:"COFORGE",name:"Coforge"},{sym:"COLPAL",name:"Colgate"},{sym:"CONCOR",name:"Container Corp"},{sym:"CUMMINSIND",name:"Cummins India"},{sym:"DABUR",name:"Dabur"},{sym:"DEEPAKNTR",name:"Deepak Nitrite"},{sym:"DELHIVERY",name:"Delhivery"},{sym:"DIVISLAB",name:"Divi's Labs"},{sym:"DIXON",name:"Dixon Tech"},{sym:"DLF",name:"DLF"},{sym:"DRREDDY",name:"Dr Reddy's"},{sym:"EICHERMOT",name:"Eicher Motors"},{sym:"FACT",name:"FACT"},{sym:"FEDERALBNK",name:"Federal Bank"},{sym:"FLUOROCHEM",name:"Gujarat Fluoro"},{sym:"FSN",name:"Nykaa"},{sym:"GAIL",name:"GAIL"},{sym:"GLENMARK",name:"Glenmark"},{sym:"GMRAIRPORT",name:"GMR Airports"},{sym:"GODREJCP",name:"Godrej Consumer"},{sym:"GODREJPROP",name:"Godrej Properties"},{sym:"GRANULES",name:"Granules"},{sym:"GRASIM",name:"Grasim"},{sym:"GSPL",name:"Gujarat Petronet"},{sym:"HAL",name:"HAL"},{sym:"HAVELLS",name:"Havells"},{sym:"HCLTECH",name:"HCL Tech"},{sym:"HDFCAMC",name:"HDFC AMC"},{sym:"HDFCBANK",name:"HDFC Bank"},{sym:"HDFCLIFE",name:"HDFC Life"},{sym:"HEROMOTOCO",name:"Hero MotoCorp"},{sym:"HINDALCO",name:"Hindalco"},{sym:"HINDCOPPER",name:"Hindustan Copper"},{sym:"HINDUNILVR",name:"HUL"},{sym:"HINDZINC",name:"Hindustan Zinc"},{sym:"HUDCO",name:"HUDCO"},{sym:"ICICIBANK",name:"ICICI Bank"},{sym:"ICICIGI",name:"ICICI Lombard"},{sym:"ICICIPRULI",name:"ICICI Pru Life"},{sym:"IDEA",name:"Vodafone Idea"},{sym:"IDFCFIRSTB",name:"IDFC First Bank"},{sym:"IEX",name:"IEX"},{sym:"IGL",name:"IGL"},{sym:"INDHOTEL",name:"Indian Hotels"},{sym:"INDIAMART",name:"IndiaMART"},{sym:"INDIGO",name:"IndiGo"},{sym:"INDUSINDBK",name:"IndusInd Bank"},{sym:"INDUSTOWER",name:"Indus Towers"},{sym:"INFY",name:"Infosys"},{sym:"IOC",name:"Indian Oil"},{sym:"IRCTC",name:"IRCTC"},{sym:"IRFC",name:"IRFC"},{sym:"ITC",name:"ITC"},{sym:"JINDALSTEL",name:"Jindal Steel"},{sym:"JKCEMENT",name:"JK Cement"},{sym:"JSL",name:"Jindal Stainless"},{sym:"JSWENERGY",name:"JSW Energy"},{sym:"JSWSTEEL",name:"JSW Steel"},{sym:"JUBLFOOD",name:"Jubilant Food"},{sym:"KAJARIACER",name:"Kajaria"},{sym:"KALYANKJIL",name:"Kalyan Jewellers"},{sym:"KOTAKBANK",name:"Kotak Bank"},{sym:"KPITTECH",name:"KPIT Tech"},{sym:"LT",name:"L&T"},{sym:"LICHSGFIN",name:"LIC Housing"},{sym:"LICI",name:"LIC"},{sym:"LODHA",name:"Lodha"},{sym:"LTIM",name:"LTIMindtree"},{sym:"LTTS",name:"L&T Tech"},{sym:"LUPIN",name:"Lupin"},{sym:"M&M",name:"M&M"},{sym:"M&MFIN",name:"M&M Financial"},{sym:"MARICO",name:"Marico"},{sym:"MARUTI",name:"Maruti"},{sym:"MAXHEALTH",name:"Max Healthcare"},{sym:"MFSL",name:"Max Financial"},{sym:"MPHASIS",name:"Mphasis"},{sym:"MUTHOOTFIN",name:"Muthoot Finance"},{sym:"NATIONALUM",name:"National Aluminium"},{sym:"NAUKRI",name:"Info Edge"},{sym:"NAVINFLUOR",name:"Navin Fluorine"},{sym:"NESTLEIND",name:"Nestle India"},{sym:"NHPC",name:"NHPC"},{sym:"NMDC",name:"NMDC"},{sym:"NTPC",name:"NTPC"},{sym:"OBEROIRLTY",name:"Oberoi Realty"},{sym:"OFSS",name:"Oracle Financial"},{sym:"ONGC",name:"ONGC"},{sym:"PAGEIND",name:"Page Industries"},{sym:"PATANJALI",name:"Patanjali Foods"},{sym:"PAYTM",name:"Paytm"},{sym:"PERSISTENT",name:"Persistent"},{sym:"PFC",name:"PFC"},{sym:"PIIND",name:"PI Industries"},{sym:"PIDILITIND",name:"Pidilite"},{sym:"POLICYBZR",name:"PolicyBazaar"},{sym:"POLYCAB",name:"Polycab"},{sym:"PNB",name:"Punjab National Bank"},{sym:"POONAWALLA",name:"Poonawalla Fincorp"},{sym:"POWERGRID",name:"Power Grid"},{sym:"PRESTIGE",name:"Prestige"},{sym:"RAMCOCEM",name:"Ramco Cements"},{sym:"RECLTD",name:"REC"},{sym:"RELIANCE",name:"Reliance"},{sym:"RVNL",name:"RVNL"},{sym:"SAIL",name:"SAIL"},{sym:"SBICARD",name:"SBI Cards"},{sym:"SBILIFE",name:"SBI Life"},{sym:"SBIN",name:"SBI"},{sym:"SCHAEFFLER",name:"Schaeffler"},{sym:"SHREECEM",name:"Shree Cement"},{sym:"SHRIRAMFIN",name:"Shriram Finance"},{sym:"SIEMENS",name:"Siemens"},{sym:"SJVN",name:"SJVN"},{sym:"SOLARINDS",name:"Solar Industries"},{sym:"SONACOMS",name:"Sona BLW"},{sym:"STARHEALTH",name:"Star Health"},{sym:"SUNPHARMA",name:"Sun Pharma"},{sym:"SUNTV",name:"Sun TV"},{sym:"SUZLON",name:"Suzlon"},{sym:"SWIGGY",name:"Swiggy"},{sym:"TATACHEM",name:"Tata Chemicals"},{sym:"TATACOMM",name:"Tata Comm"},{sym:"TATACONSUM",name:"Tata Consumer"},{sym:"TATAELXSI",name:"Tata Elxsi"},{sym:"TATAMOTORS",name:"Tata Motors"},{sym:"TATAPOWER",name:"Tata Power"},{sym:"TATASTEEL",name:"Tata Steel"},{sym:"TCS",name:"TCS"},{sym:"TECHM",name:"Tech Mahindra"},{sym:"TIINDIA",name:"Tube Investments"},{sym:"TITAN",name:"Titan"},{sym:"TORNTPHARM",name:"Torrent Pharma"},{sym:"TORNTPOWER",name:"Torrent Power"},{sym:"TRENT",name:"Trent"},{sym:"TVSMOTOR",name:"TVS Motor"},{sym:"UBL",name:"United Breweries"},{sym:"ULTRACEMCO",name:"UltraTech"},{sym:"UNIONBANK",name:"Union Bank"},{sym:"UPL",name:"UPL"},{sym:"VBL",name:"Varun Beverages"},{sym:"VEDL",name:"Vedanta"},{sym:"VOLTAS",name:"Voltas"},{sym:"WIPRO",name:"Wipro"},{sym:"YESBANK",name:"Yes Bank"},{sym:"ZOMATO",name:"Zomato"},{sym:"ZYDUSLIFE",name:"Zydus"},{sym:"NIFTY",name:"Nifty 50 Index"}
+  {sym:"ABB",name:"ABB India"},{sym:"ABCAPITAL",name:"Aditya Birla Capital"},{sym:"ABFRL",name:"Aditya Birla Fashion"},{sym:"ADANIENT",name:"Adani Enterprises"},{sym:"ADANIENSOL",name:"Adani Energy Solutions"},{sym:"ADANIGREEN",name:"Adani Green Energy"},{sym:"ADANIPORTS",name:"Adani Ports"},{sym:"ADANIPOWER",name:"Adani Power"},{sym:"ALKEM",name:"Alkem Labs"},{sym:"AMBUJACEM",name:"Ambuja Cements"},{sym:"APOLLOHOSP",name:"Apollo Hospitals"},{sym:"APOLLOTYRE",name:"Apollo Tyres"},{sym:"ASHOKLEY",name:"Ashok Leyland"},{sym:"ASIANPAINT",name:"Asian Paints"},{sym:"ASTRAL",name:"Astral"},{sym:"ATUL",name:"Atul"},{sym:"ATGL",name:"Adani Total Gas"},{sym:"AUROPHARMA",name:"Aurobindo Pharma"},{sym:"AWL",name:"Adani Wilmar"},{sym:"AXISBANK",name:"Axis Bank"},{sym:"BAJAJ-AUTO",name:"Bajaj Auto"},{sym:"BAJAJFINSV",name:"Bajaj Finserv"},{sym:"BAJAJHLDNG",name:"Bajaj Holdings"},{sym:"BAJFINANCE",name:"Bajaj Finance"},{sym:"BALKRISIND",name:"Balkrishna Industries"},{sym:"BANDHANBNK",name:"Bandhan Bank"},{sym:"BANKBARODA",name:"Bank of Baroda"},{sym:"BEL",name:"Bharat Electronics"},{sym:"BERGEPAINT",name:"Berger Paints"},{sym:"BHARTIARTL",name:"Bharti Airtel"},{sym:"BHEL",name:"BHEL"},{sym:"BIOCON",name:"Biocon"},{sym:"BOSCHLTD",name:"Bosch"},{sym:"BPCL",name:"BPCL"},{sym:"BRITANNIA",name:"Britannia"},{sym:"BSE",name:"BSE"},{sym:"CANBK",name:"Canara Bank"},{sym:"CDSL",name:"CDSL"},{sym:"CESC",name:"CESC"},{sym:"CGPOWER",name:"CG Power"},{sym:"CHOLAFIN",name:"Cholamandalam"},{sym:"CIPLA",name:"Cipla"},{sym:"COALINDIA",name:"Coal India"},{sym:"COFORGE",name:"Coforge"},{sym:"COLPAL",name:"Colgate"},{sym:"CONCOR",name:"Container Corp"},{sym:"CUMMINSIND",name:"Cummins India"},{sym:"DABUR",name:"Dabur"},{sym:"DEEPAKNTR",name:"Deepak Nitrite"},{sym:"DELHIVERY",name:"Delhivery"},{sym:"DIVISLAB",name:"Divi's Labs"},{sym:"DIXON",name:"Dixon Tech"},{sym:"DLF",name:"DLF"},{sym:"DRREDDY",name:"Dr Reddy's"},{sym:"EICHERMOT",name:"Eicher Motors"},{sym:"FACT",name:"FACT"},{sym:"FEDERALBNK",name:"Federal Bank"},{sym:"FLUOROCHEM",name:"Gujarat Fluoro"},{sym:"FSN",name:"Nykaa"},{sym:"GAIL",name:"GAIL"},{sym:"GLENMARK",name:"Glenmark"},{sym:"GMRAIRPORT",name:"GMR Airports"},{sym:"GODREJCP",name:"Godrej Consumer"},{sym:"GODREJPROP",name:"Godrej Properties"},{sym:"GRANULES",name:"Granules"},{sym:"GRASIM",name:"Grasim"},{sym:"GSPL",name:"Gujarat Petronet"},{sym:"HAL",name:"HAL"},{sym:"HAVELLS",name:"Havells"},{sym:"HCLTECH",name:"HCL Tech"},{sym:"HDFCAMC",name:"HDFC AMC"},{sym:"HDFCBANK",name:"HDFC Bank"},{sym:"HDFCLIFE",name:"HDFC Life"},{sym:"HEROMOTOCO",name:"Hero MotoCorp"},{sym:"HINDALCO",name:"Hindalco"},{sym:"HINDCOPPER",name:"Hindustan Copper"},{sym:"HINDUNILVR",name:"HUL"},{sym:"HINDZINC",name:"Hindustan Zinc"},{sym:"HUDCO",name:"HUDCO"},{sym:"ICICIBANK",name:"ICICI Bank"},{sym:"ICICIGI",name:"ICICI Lombard"},{sym:"ICICIPRULI",name:"ICICI Pru Life"},{sym:"IDEA",name:"Vodafone Idea"},{sym:"IDFCFIRSTB",name:"IDFC First Bank"},{sym:"IEX",name:"IEX"},{sym:"IGL",name:"IGL"},{sym:"INDHOTEL",name:"Indian Hotels"},{sym:"INDIAMART",name:"IndiaMART"},{sym:"INDIGO",name:"IndiGo"},{sym:"INDUSINDBK",name:"IndusInd Bank"},{sym:"INDUSTOWER",name:"Indus Towers"},{sym:"INFY",name:"Infosys"},{sym:"IOC",name:"Indian Oil"},{sym:"IRCTC",name:"IRCTC"},{sym:"IRFC",name:"IRFC"},{sym:"ITC",name:"ITC"},{sym:"JINDALSTEL",name:"Jindal Steel"},{sym:"JKCEMENT",name:"JK Cement"},{sym:"JSL",name:"Jindal Stainless"},{sym:"JSWENERGY",name:"JSW Energy"},{sym:"JSWSTEEL",name:"JSW Steel"},{sym:"JUBLFOOD",name:"Jubilant Food"},{sym:"KAJARIACER",name:"Kajaria"},{sym:"KALYANKJIL",name:"Kalyan Jewellers"},{sym:"KOTAKBANK",name:"Kotak Bank"},{sym:"KPITTECH",name:"KPIT Tech"},{sym:"LT",name:"L&T"},{sym:"LICHSGFIN",name:"LIC Housing"},{sym:"LICI",name:"LIC"},{sym:"LODHA",name:"Lodha"},{sym:"LTIM",name:"LTIMindtree"},{sym:"LTTS",name:"L&T Tech"},{sym:"LUPIN",name:"Lupin"},{sym:"M&M",name:"M&M"},{sym:"M&MFIN",name:"M&M Financial"},{sym:"MARICO",name:"Marico"},{sym:"MARUTI",name:"Maruti"},{sym:"MAXHEALTH",name:"Max Healthcare"},{sym:"MFSL",name:"Max Financial"},{sym:"MPHASIS",name:"Mphasis"},{sym:"MUTHOOTFIN",name:"Muthoot Finance"},{sym:"NATIONALUM",name:"National Aluminium"},{sym:"NAUKRI",name:"Info Edge"},{sym:"NAVINFLUOR",name:"Navin Fluorine"},{sym:"NESTLEIND",name:"Nestle India"},{sym:"NHPC",name:"NHPC"},{sym:"NMDC",name:"NMDC"},{sym:"NTPC",name:"NTPC"},{sym:"OBEROIRLTY",name:"Oberoi Realty"},{sym:"OFSS",name:"Oracle Financial"},{sym:"ONGC",name:"ONGC"},{sym:"PAGEIND",name:"Page Industries"},{sym:"PATANJALI",name:"Patanjali Foods"},{sym:"PAYTM",name:"Paytm"},{sym:"PERSISTENT",name:"Persistent"},{sym:"PFC",name:"PFC"},{sym:"PIIND",name:"PI Industries"},{sym:"PIDILITIND",name:"Pidilite"},{sym:"POLICYBZR",name:"PolicyBazaar"},{sym:"POLYCAB",name:"Polycab"},{sym:"PNB",name:"Punjab National Bank"},{sym:"POONAWALLA",name:"Poonawalla Fincorp"},{sym:"POWERGRID",name:"Power Grid"},{sym:"PRESTIGE",name:"Prestige"},{sym:"RAMCOCEM",name:"Ramco Cements"},{sym:"RECLTD",name:"REC"},{sym:"RELIANCE",name:"Reliance"},{sym:"RVNL",name:"RVNL"},{sym:"SAIL",name:"SAIL"},{sym:"SBICARD",name:"SBI Cards"},{sym:"SBILIFE",name:"SBI Life"},{sym:"SBIN",name:"SBI"},{sym:"SCHAEFFLER",name:"Schaeffler"},{sym:"SHREECEM",name:"Shree Cement"},{sym:"SHRIRAMFIN",name:"Shriram Finance"},{sym:"SIEMENS",name:"Siemens"},{sym:"SJVN",name:"SJVN"},{sym:"SOLARINDS",name:"Solar Industries"},{sym:"SONACOMS",name:"Sona BLW"},{sym:"STARHEALTH",name:"Star Health"},{sym:"SUNPHARMA",name:"Sun Pharma"},{sym:"SUNTV",name:"Sun TV"},{sym:"SUZLON",name:"Suzlon"},{sym:"SWIGGY",name:"Swiggy"},{sym:"TATACHEM",name:"Tata Chemicals"},{sym:"TATACOMM",name:"Tata Comm"},{sym:"TATACONSUM",name:"Tata Consumer"},{sym:"TATAELXSI",name:"Tata Elxsi"},{sym:"TATAMOTORS",name:"Tata Motors"},{sym:"TATAPOWER",name:"Tata Power"},{sym:"TATASTEEL",name:"Tata Steel"},{sym:"TCS",name:"TCS"},{sym:"TECHM",name:"Tech Mahindra"},{sym:"TIINDIA",name:"Tube Investments"},{sym:"TITAN",name:"Titan"},{sym:"TORNTPHARM",name:"Torrent Pharma"},{sym:"TORNTPOWER",name:"Torrent Power"},{sym:"TRENT",name:"Trent"},{sym:"TVSMOTOR",name:"TVS Motor"},{sym:"UBL",name:"United Breweries"},{sym:"ULTRACEMCO",name:"UltraTech"},{sym:"UNIONBANK",name:"Union Bank"},{sym:"UPL",name:"UPL"},{sym:"VBL",name:"Varun Beverages"},{sym:"VEDL",name:"Vedanta"},{sym:"VOLTAS",name:"Voltas"},{sym:"WIPRO",name:"Wipro"},{sym:"YESBANK",name:"Yes Bank"},{sym:"ZOMATO",name:"Zomato"},{sym:"ZYDUSLIFE",name:"Zydus"}
 ];
 
 function MiniChart(props) {
@@ -261,37 +290,69 @@ function App() {
   var er = React.useState(""); var err = er[0]; var setErr = er[1];
   var lo = React.useState(""); var loading = lo[0]; var setLoading = lo[1];
   var vw = React.useState("chart"); var view = vw[0]; var setView = vw[1];
+  var su = React.useState(function(){ try { return localStorage.getItem(SHEET_URL_KEY) || ""; } catch(e) { return ""; } });
+  var sheetUrl = su[0]; var setSheetUrl = su[1];
 
-  function handleAdd(csvRaw, lbl) {
+  function saveSheetUrl(u) {
+    setSheetUrl(u);
+    try { localStorage.setItem(SHEET_URL_KEY, u); } catch(e) {}
+  }
+
+  function handleAdd(csvRaw, lbl, replace) {
     setErr("");
     var parsed = parseCSV(csvRaw);
     if (parsed.error) { setErr(parsed.error); return false; }
     var res = calcSignals(parsed.rows);
     var name = (lbl && lbl.trim()) || parsed.stockName || ("Stock " + (stocks.length + 1));
-    setStocks(function(p){ return p.concat([{ name: name, rows: res.rows, trades: res.trades, openPosition: res.openPosition, pendingGtt: res.pendingGtt }]); });
-    setActive(stocks.length);
+    var newStock = { name: name, rows: res.rows, trades: res.trades, openPosition: res.openPosition, pendingGtt: res.pendingGtt };
+    setStocks(function(p){
+      var idx = -1;
+      for (var k = 0; k < p.length; k++) { if (p[k].name === name) { idx = k; break; } }
+      if (idx >= 0) {
+        var copy = p.slice();
+        copy[idx] = newStock;
+        setActive(idx);
+        return copy;
+      }
+      setActive(p.length);
+      return p.concat([newStock]);
+    });
     return true;
   }
+
   function submitAdd() {
     var fullName = label ? "NSE:" + label.replace(/^NSE:/i, "") : "";
     if (handleAdd(csvTxt, fullName)) { setCsvTxt(""); setLabel(""); setModal(false); }
   }
+
   function loadSample() {
     setErr(""); setLoading("NTPC का data ला रहे हैं...");
     fetchFromYahoo("NTPC").then(function(r){ handleAdd(r.csv, r.name); }).catch(function(e){ setErr("❌ " + e.message); }).finally(function(){ setLoading(""); });
   }
+
   function directLoad() {
     if (!label || !label.trim()) { setErr("पहले stock चुनें"); return; }
     setErr(""); setLoading(label + " का data ला रहे हैं...");
     fetchFromYahoo(label.trim()).then(function(r){
       var ok = handleAdd(r.csv, r.name);
       if (ok) { setCsvTxt(""); setLabel(""); setModal(false); }
-    }).catch(function(e){ setErr("❌ " + e.message + " — दूसरा stock try करें"); }).finally(function(){ setLoading(""); });
+    }).catch(function(e){ setErr("❌ " + e.message); }).finally(function(){ setLoading(""); });
   }
+
+  function loadFromSheet() {
+    if (!sheetUrl || !sheetUrl.trim()) { setErr("पहले Sheet की published CSV URL paste करें"); return; }
+    setErr(""); setLoading("Google Sheet से data ला रहे हैं...");
+    fetchFromSheet(sheetUrl.trim()).then(function(r){
+      var ok = handleAdd(r.csv, "");
+      if (ok) { setCsvTxt(""); setLabel(""); setModal(false); }
+    }).catch(function(e){ setErr("❌ " + e.message); }).finally(function(){ setLoading(""); });
+  }
+
   function removeStock(idx) {
     setStocks(function(p){ return p.filter(function(_,i){ return i !== idx; }); });
     setActive(function(a){ return Math.max(0, a >= idx ? a-1 : a); });
   }
+
   function onFile(e) {
     var f = e.target.files && e.target.files[0];
     if (!f) return;
@@ -299,6 +360,7 @@ function App() {
     reader.onload = function(ev){ setCsvTxt(ev.target.result); };
     reader.readAsText(f);
   }
+
   var s = stocks[active];
   var last = s ? s.rows[s.rows.length - 1] : null;
   var C = { bg:"#080f1a", card:"#0f1e33", border:"#1e3352", accent:"#2563eb", dim:"#4a6fa5", muted:"#64748b", buy:"#4ade80", buyBg:"rgba(74,222,128,0.08)", gtt:"#fbbf24", gttBg:"rgba(251,191,36,0.08)", high:"#f87171", low:"#34d399", text:"#dce8f8" };
@@ -315,7 +377,7 @@ function App() {
     <div style={{ fontFamily:"'Inter',system-ui,sans-serif", background:C.bg, color:C.text, minHeight:"100vh", fontSize:14 }}>
       <div style={{ background:C.card, padding:"12px 16px", display:"flex", alignItems:"center", gap:10, borderBottom:"1px solid " + C.border }}>
         <div style={{ flex:1 }}>
-          <span style={{ fontWeight:700, fontSize:16 }}>📈 20-Day Breakout + GTT Tracker</span>
+          <span style={{ fontWeight:700, fontSize:16 }}>📈 20-Day Breakout + GTT</span>
           <span style={{ fontSize:11, color:C.muted, marginLeft:10 }}>6.28% Target</span>
         </div>
         <button onClick={function(){ setModal(true); }}
@@ -324,9 +386,9 @@ function App() {
         </button>
       </div>
       {stocks.length > 0 && <div style={{ display:"flex", overflowX:"auto", background:C.card, borderBottom:"1px solid " + C.border, padding:"0 8px" }}>
-        {stocks.map(function(st,i){
+        {stocks.map(function(stk,i){
           return <div key={i} style={{ display:"flex", alignItems:"center", gap:4 }}>
-            <button onClick={function(){ setActive(i); }} style={{ background:"none", border:"none", borderBottom: active===i ? "2px solid " + C.accent : "2px solid transparent", color: active===i ? "#93c5fd" : C.muted, padding:"9px 10px", fontSize:12, fontWeight: active===i ? 700 : 400, cursor:"pointer", whiteSpace:"nowrap" }}>{st.name}</button>
+            <button onClick={function(){ setActive(i); }} style={{ background:"none", border:"none", borderBottom: active===i ? "2px solid " + C.accent : "2px solid transparent", color: active===i ? "#93c5fd" : C.muted, padding:"9px 10px", fontSize:12, fontWeight: active===i ? 700 : 400, cursor:"pointer", whiteSpace:"nowrap" }}>{stk.name}</button>
             <button onClick={function(){ removeStock(i); }} style={{ background:"none", border:"none", color:C.muted, cursor:"pointer", fontSize:14, padding:"0 4px 0 0", lineHeight:1 }}>×</button>
           </div>;
         })}
@@ -335,23 +397,23 @@ function App() {
         <div style={{ fontSize:52 }}>📊</div>
         <div>
           <div style={{ fontWeight:700, fontSize:20, marginBottom:6 }}>GTT Backtest शुरू करें</div>
-          <div style={{ color:C.muted, fontSize:13 }}>कोई भी NIFTY200 stock चुनो — data अपने आप आ जाएगा</div>
+          <div style={{ color:C.muted, fontSize:13 }}>Google Sheet link करो — sheet में stock बदलो, app में एक tap</div>
         </div>
         <div style={{ display:"flex", gap:10, flexWrap:"wrap", justifyContent:"center" }}>
           <button onClick={function(){ setModal(true); }} disabled={!!loading}
             style={{ background:C.accent, color:"#fff", border:"none", borderRadius:10, padding:"11px 22px", fontSize:14, fontWeight:600, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
             + Stock Add करें
           </button>
-          <button onClick={loadSample} disabled={!!loading}
-            style={{ background:"none", color:"#93c5fd", border:"1px solid " + C.border, borderRadius:10, padding:"11px 22px", fontSize:14, fontWeight:600, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
-            {loading ? "⏳ " + loading : "🔍 NTPC Demo"}
-          </button>
+          {sheetUrl && <button onClick={loadFromSheet} disabled={!!loading}
+            style={{ background:"#16a34a", color:"#fff", border:"none", borderRadius:10, padding:"11px 22px", fontSize:14, fontWeight:600, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
+            {loading ? "⏳ Load हो रहा है..." : "🔄 Sheet से Load करो"}
+          </button>}
         </div>
         {err && <div style={{ color:"#f87171", fontSize:12, maxWidth:400 }}>{err}</div>}
-        <div style={card({ padding:"12px 18px", maxWidth:400, textAlign:"left" })}>
+        <div style={card({ padding:"12px 18px", maxWidth:440, textAlign:"left" })}>
           <div style={{ fontSize:12, color:C.muted, lineHeight:1.9 }}>
             <b style={{color:C.text}}>Strategy:</b><br/>
-            1️⃣ <span style={{color:C.gtt}}>नया 20D Low</span> → GTT @ 20D High<br/>
+            1️⃣ <span style={{color:C.gtt}}>नया 20D Low</span> → GTT @ 20D High (रोज़ update)<br/>
             2️⃣ <span style={{color:C.buy}}>Price ≥ GTT</span> → BUY<br/>
             3️⃣ <span style={{color:"#93c5fd"}}>Target = Buy × 1.0628</span><br/>
             4️⃣ Target hit → Trade close → फिर IDLE
@@ -384,6 +446,7 @@ function App() {
           {views.map(function(v){
             return <button key={v.key} onClick={function(){ setView(v.key); }} style={{ background: view===v.key ? C.accent : "none", color: view===v.key ? "#fff" : C.muted, border: "1px solid " + (view===v.key ? C.accent : C.border), borderRadius:8, padding:"6px 12px", fontSize:12, cursor:"pointer", fontWeight: view===v.key ? 700 : 400, whiteSpace:"nowrap" }}>{v.lbl}</button>;
           })}
+          {sheetUrl && <button onClick={loadFromSheet} disabled={!!loading} style={{ marginLeft:"auto", background:"#16a34a", color:"#fff", border:"none", borderRadius:8, padding:"6px 12px", fontSize:12, fontWeight:700, cursor:"pointer", whiteSpace:"nowrap", opacity: loading ? 0.6 : 1 }}>🔄 Sheet</button>}
         </div>
         {view === "chart" && <div style={{ padding:"0 10px 20px" }}>
           <div style={card({ padding:"10px 0" })}>
@@ -444,7 +507,7 @@ function App() {
             <thead>
               <tr style={{ background:C.card }}>
                 {["Date","Close","20D Low","20D High","GTT Price","Event"].map(function(h){
-                  return <th key={h} style={{ padding:"8px", textAlign:["Date","Event"].includes(h)?"left":"right", color:C.muted, fontWeight:600, borderBottom:"1px solid " + C.border, whiteSpace:"nowrap", fontSize:10 }}>{h}</th>;
+                  return <th key={h} style={{ padding:"8px", textAlign:["Date","Event"].indexOf(h)>=0?"left":"right", color:C.muted, fontWeight:600, borderBottom:"1px solid " + C.border, whiteSpace:"nowrap", fontSize:10 }}>{h}</th>;
                 })}
               </tr>
             </thead>
@@ -475,30 +538,52 @@ function App() {
         onClick={function(e){ if (e.currentTarget === e.target) { setModal(false); setErr(""); } }}>
         <div style={{ background:"#0d1a2a", borderTop:"1px solid " + C.border, borderRadius:"18px 18px 0 0", padding:20, width:"100%", maxHeight:"90vh", overflowY:"auto" }}>
           <div style={{ fontWeight:700, fontSize:16, marginBottom:18 }}>📥 Stock Add करें</div>
-          <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>Stock चुनें (NIFTY200)</label>
-          <input list="nifty200-list" value={label} onChange={function(e){ setLabel(e.target.value); }} placeholder="Type करो — जैसे: RELIANCE"
+
+          <div style={{ background:"#052e16", border:"1px solid #166534", borderRadius:10, padding:"12px 14px", marginBottom:14 }}>
+            <div style={{ fontSize:12, color:"#86efac", fontWeight:700, marginBottom:8 }}>🔗 Google Sheet से (Recommended)</div>
+            <input
+              value={sheetUrl}
+              onChange={function(e){ saveSheetUrl(e.target.value); }}
+              placeholder="Sheet की published CSV URL paste करें"
+              style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:11, fontFamily:"monospace", boxSizing:"border-box", marginBottom:10, outline:"none" }} />
+            <button onClick={loadFromSheet} disabled={!!loading}
+              style={{ width:"100%", background:"#16a34a", color:"#fff", border:"none", borderRadius:8, padding:11, fontSize:14, fontWeight:700, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
+              {loading ? "⏳ " + loading : "🔄 Sheet से Load करो"}
+            </button>
+            <div style={{ fontSize:10, color:"#86efac", marginTop:8, lineHeight:1.6 }}>
+              💡 Sheet में stock बदलो → यह button दबाओ → नया data आ जाएगा
+            </div>
+          </div>
+
+          <div style={{ textAlign:"center", fontSize:11, color:C.muted, marginBottom:12 }}>─── या ───</div>
+
+          <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>📥 Yahoo Finance से (auto data)</label>
+          <input list="nifty200-list" value={label} onChange={function(e){ setLabel(e.target.value); }} placeholder="Stock चुनें (जैसे: RELIANCE)"
             style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:14, boxSizing:"border-box", marginBottom:10, outline:"none" }} />
           <datalist id="nifty200-list">
-            {NIFTY200.map(function(st){ return <option key={st.sym} value={st.sym}>{st.sym} — {st.name}</option>; })}
+            {NIFTY200.map(function(stk){ return <option key={stk.sym} value={stk.sym}>{stk.sym} — {stk.name}</option>; })}
           </datalist>
           <button onClick={directLoad} disabled={!!loading}
-            style={{ width:"100%", background:"#16a34a", color:"#fff", border:"none", borderRadius:10, padding:12, fontSize:14, fontWeight:700, cursor:"pointer", marginBottom:12, opacity: loading ? 0.6 : 1 }}>
-            {loading ? "⏳ " + loading : "📥 Direct Load करो (auto data)"}
+            style={{ width:"100%", background:"#2563eb", color:"#fff", border:"none", borderRadius:8, padding:11, fontSize:14, fontWeight:700, cursor:"pointer", marginBottom:14, opacity: loading ? 0.6 : 1 }}>
+            {loading ? "⏳ " + loading : "📥 Yahoo से Load करो"}
           </button>
+
           <div style={{ textAlign:"center", fontSize:11, color:C.muted, marginBottom:12 }}>─── या manual ───</div>
+
           <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>CSV File Upload</label>
           <input type="file" accept=".csv,.txt" onChange={onFile}
             style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:13, boxSizing:"border-box", marginBottom:10 }} />
-          <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>या CSV Paste करें</label>
-          <textarea value={csvTxt} onChange={function(e){ setCsvTxt(e.target.value); }} rows={5}
+          <textarea value={csvTxt} onChange={function(e){ setCsvTxt(e.target.value); }} rows={4}
             placeholder={"Date,Open,High,Low,Close,Volume\n..."}
             style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:11, fontFamily:"monospace", resize:"vertical", boxSizing:"border-box", marginBottom:10, outline:"none" }} />
+
           {err && <div style={{ color:"#f87171", background:"rgba(239,68,68,.1)", border:"1px solid rgba(239,68,68,.3)", borderRadius:8, padding:"8px 12px", fontSize:12, marginBottom:12 }}>{err}</div>}
+
           <div style={{ display:"flex", gap:10 }}>
             <button onClick={function(){ setModal(false); setErr(""); setCsvTxt(""); setLabel(""); }}
               style={{ flex:1, background:C.border, color:C.text, border:"none", borderRadius:10, padding:12, fontSize:14, cursor:"pointer" }}>Cancel</button>
             <button onClick={submitAdd}
-              style={{ flex:2, background:C.accent, color:"#fff", border:"none", borderRadius:10, padding:12, fontSize:14, fontWeight:700, cursor:"pointer" }}>✅ Manual CSV से चलाओ</button>
+              style={{ flex:2, background:C.accent, color:"#fff", border:"none", borderRadius:10, padding:12, fontSize:14, fontWeight:700, cursor:"pointer" }}>✅ Manual CSV चलाओ</button>
           </div>
         </div>
       </div>}
