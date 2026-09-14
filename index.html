@@ -92,10 +92,20 @@ async function fetchFromYahoo(sym) {
   if (lines.length < 21) throw new Error("कम data मिला");
   return { csv: lines.join("\n"), name: "NSE:" + clean };
 }
-
 async function fetchFromSheet(url) {
+  // पहले direct try करो (Google Sheets published CSV CORS support करता है)
+  try {
+    const direct = await fetch(url);
+    if (direct.ok) {
+      const text = await direct.text();
+      if (text.indexOf("Date") !== -1) return { csv: text, name: "" };
+    }
+  } catch (e) {}
+  // अगर direct fail हो, तो proxy try करो
   const text = await fetchViaProxy(url);
   if (text.indexOf("Date") === -1) throw new Error("Sheet में Date column नहीं मिला — published CSV URL सही है?");
+  return { csv: text, name: "" };
+}
   return { csv: text, name: "" };
 }
 
