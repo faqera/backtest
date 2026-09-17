@@ -8,6 +8,7 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: #080f1a; -webkit-tap-highlight-color: transparent; }
   input, textarea, button { font-family: inherit; }
+  input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 </style>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -30,6 +31,13 @@ function fmtD(d) {
 function fmtN(v, dec) {
   if (v == null || isNaN(v)) return "—";
   return Number(v).toFixed(dec == null ? 2 : dec);
+}
+function fmtRs(v) {
+  if (v == null || isNaN(v)) return "—";
+  var n = Number(v);
+  var sign = n < 0 ? "-" : "";
+  n = Math.abs(n);
+  return sign + "₹" + n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
 }
 function csvEsc(v) {
   if (v == null) return "";
@@ -276,19 +284,30 @@ function calcPortfolioStats(stocks) {
   if (!stocks || !stocks.length) return null;
   var totalTrades = 0, wins = 0, losses = 0, grossWin = 0, grossLoss = 0;
   var heldDays = 0, openCount = 0, gttCount = 0, idleCount = 0;
+  var totalInvestedRs = 0, totalProfitRs = 0, totalReturnedRs = 0;
   var perStock = [];
   for (var i = 0; i < stocks.length; i++) {
     var s = stocks[i];
     var t = s.trades || [];
+    var q = s.qty || 1;
     var w = 0, l = 0, sw = 0, sl = 0, d = 0;
+    var investedRs = 0, returnedRs = 0, profitRs = 0;
     for (var j = 0; j < t.length; j++) {
       var tr = t[j];
       if (tr.pct > 0) { w++; sw += tr.pct; }
       else { l++; sl += Math.abs(tr.pct); }
       d += (tr.days || 0);
+      var cost = q * tr.entry;
+      var ret = q * tr.exit;
+      investedRs += cost;
+      returnedRs += ret;
+      profitRs += (ret - cost);
     }
     totalTrades += t.length; wins += w; losses += l;
     grossWin += sw; grossLoss += sl; heldDays += d;
+    totalInvestedRs += investedRs;
+    totalReturnedRs += returnedRs;
+    totalProfitRs += profitRs;
     var status = s.openPosition ? "HOLDING" : (s.pendingGtt ? "GTT" : "IDLE");
     if (s.openPosition) openCount++;
     else if (s.pendingGtt) gttCount++;
@@ -300,7 +319,11 @@ function calcPortfolioStats(stocks) {
       avgWin: w ? sw / w : 0,
       avgLoss: l ? sl / l : 0,
       netPct: sw - sl, status: status,
-      lastClose: lastRow ? lastRow.close : null
+      lastClose: lastRow ? lastRow.close : null,
+      qty: q,
+      investedRs: investedRs,
+      returnedRs: returnedRs,
+      profitRs: profitRs
     });
   }
   var winRate = totalTrades ? (wins / totalTrades) * 100 : 0;
@@ -317,6 +340,9 @@ function calcPortfolioStats(stocks) {
     profitFactor: profitFactor, expectancy: expectancy,
     openCount: openCount, gttCount: gttCount, idleCount: idleCount,
     avgHeldDays: totalTrades ? heldDays / totalTrades : 0,
+    totalInvestedRs: totalInvestedRs,
+    totalReturnedRs: totalReturnedRs,
+    totalProfitRs: totalProfitRs,
     perStock: perStock
   };
 }
@@ -392,7 +418,8 @@ function calcScreenerRow(stock) {
     date: last.date,
     gtt: stock.pendingGtt ? stock.pendingGtt.price : null,
     target: stock.openPosition ? stock.openPosition.target : null,
-    entry: stock.openPosition ? stock.openPosition.entry : null
+    entry: stock.openPosition ? stock.openPosition.entry : null,
+    qty: stock.qty || 1
   };
 }
 
@@ -500,6 +527,56 @@ function ExportBtn(props) {
   </button>;
 }
 
+// ---------- POSITION SIZER ----------
+function PositionSizer(props) {
+  var entry = props.entry || 0;
+  var qty = props.qty || 0;
+  var onChange = props.onChange;
+  var C = props.C;
+  var st = React.useState("");
+  var amtDraft = st[0]; var setAmtDraft = st[1];
+  var focusSt = React.useState(false);
+  var focused = focusSt[0]; var setFocused = focusSt[1];
+
+  React.useEffect(function(){
+    if (!focused) setAmtDraft(String(Math.round(qty * entry)));
+  }, [qty, entry, focused]);
+
+  function onQtyChange(v) {
+    var n = parseFloat(v);
+    if (isNaN(n) || n < 0) n = 0;
+    onChange(n);
+  }
+  function onAmtChange(v) {
+    setAmtDraft(v);
+    var n = parseFloat(v);
+    if (!isNaN(n) && n >= 0 && entry > 0) onChange(n / entry);
+  }
+  var inputStyle = {
+    background: C.bg, border: "1px solid " + C.border,
+    borderRadius: 6, padding: "5px 8px", color: C.text,
+    fontSize: 12, outline: "none", fontFamily: "monospace"
+  };
+  return (
+    <div style={{display:"flex", gap:8, alignItems:"center", flexWrap:"wrap"}}>
+      <div style={{display:"flex", alignItems:"center", gap:4}}>
+        <span style={{fontSize:10, color:C.muted}}>Qty</span>
+        <input type="number" min="0" step="1" value={qty}
+          onChange={function(e){ onQtyChange(e.target.value); }}
+          style={Object.assign({width:70}, inputStyle)} />
+      </div>
+      <div style={{display:"flex", alignItems:"center", gap:4}}>
+        <span style={{fontSize:10, color:C.muted}}>₹ Amount</span>
+        <input type="number" min="0" step="1000" value={amtDraft}
+          onFocus={function(){ setFocused(true); setAmtDraft(String(Math.round(qty*entry))); }}
+          onBlur={function(){ setFocused(false); }}
+          onChange={function(e){ onAmtChange(e.target.value); }}
+          style={Object.assign({width:110}, inputStyle)} />
+      </div>
+    </div>
+  );
+}
+
 function PortfolioView(props) {
   var stocks = props.stocks;
   var onSelect = props.onSelect;
@@ -513,10 +590,9 @@ function PortfolioView(props) {
     { lbl:"Win Rate", val: stats.winRate.toFixed(1) + "%", clr:C.buy },
     { lbl:"Profit Factor", val: isFinite(stats.profitFactor) ? stats.profitFactor.toFixed(2) : "∞", clr:C.gtt },
     { lbl:"Net Return", val: (stats.netPct >= 0 ? "+" : "") + stats.netPct.toFixed(2) + "%", clr: stats.netPct >= 0 ? C.buy : C.high },
-    { lbl:"Expectancy", val: stats.expectancy.toFixed(2) + "%", clr: stats.expectancy >= 0 ? C.buy : C.high },
-    { lbl:"Avg Win", val: "+" + stats.avgWin.toFixed(2) + "%", clr:C.buy },
-    { lbl:"Avg Loss", val: "-" + stats.avgLoss.toFixed(2) + "%", clr:C.high },
-    { lbl:"Avg Hold", val: stats.avgHeldDays.toFixed(1) + "d", clr:C.dim },
+    { lbl:"Invested ₹", val: fmtRs(stats.totalInvestedRs), clr:"#93c5fd" },
+    { lbl:"Total P&L ₹", val: (stats.totalProfitRs >= 0 ? "+" : "") + fmtRs(stats.totalProfitRs).replace("-",""), clr: stats.totalProfitRs >= 0 ? C.buy : C.high },
+    { lbl:"Returned ₹", val: fmtRs(stats.totalReturnedRs), clr:C.text },
     { lbl:"Holding", val: stats.openCount, clr:C.gtt },
     { lbl:"GTT Active", val: stats.gttCount, clr:C.gtt },
     { lbl:"Idle", val: stats.idleCount, clr:C.muted }
@@ -527,10 +603,10 @@ function PortfolioView(props) {
         <ExportBtn label="📥 Portfolio Summary" onClick={function(){ exportPortfolioSummary(stocks); }} />
         <ExportBtn label="📥 All Trades" onClick={function(){ exportAllTrades(stocks); }} />
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(90px,1fr))",gap:8,marginBottom:14}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(95px,1fr))",gap:8,marginBottom:14}}>
         {statCards.map(function(c,i){
           return <div key={i} style={card({padding:"10px 12px",textAlign:"center"})}>
-            <div style={{fontSize:16,fontWeight:700,color:c.clr,fontFamily:"monospace"}}>{c.val}</div>
+            <div style={{fontSize:15,fontWeight:700,color:c.clr,fontFamily:"monospace"}}>{c.val}</div>
             <div style={{fontSize:10,color:C.muted,marginTop:2}}>{c.lbl}</div>
           </div>;
         })}
@@ -543,7 +619,7 @@ function PortfolioView(props) {
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
             <thead>
               <tr style={{background:"#0a1626"}}>
-                {["Stock","Trades","Win%","Avg Win","Avg Loss","Net%","Status","Last"].map(function(h){
+                {["Stock","Qty","Trades","Win%","Net%","Invested ₹","P&L ₹","Status"].map(function(h){
                   return <th key={h} style={{padding:"8px",textAlign:"left",color:C.muted,fontWeight:600,borderBottom:"1px solid " + C.border,whiteSpace:"nowrap",fontSize:10}}>{h}</th>;
                 })}
               </tr>
@@ -554,13 +630,13 @@ function PortfolioView(props) {
                 return <tr key={i} style={{borderBottom:"1px solid #0d1a2a",cursor:onSelect?"pointer":"default"}}
                   onClick={onSelect ? function(){ onSelect(i); } : null}>
                   <td style={{padding:"7px 8px",color:"#93c5fd",fontWeight:600,whiteSpace:"nowrap"}}>{p.name}</td>
+                  <td style={{padding:"7px 8px",fontFamily:"monospace"}}>{p.qty}</td>
                   <td style={{padding:"7px 8px",fontFamily:"monospace"}}>{p.trades}</td>
                   <td style={{padding:"7px 8px",fontFamily:"monospace",color:p.winRate>=50?C.buy:C.high}}>{p.winRate.toFixed(0)}%</td>
-                  <td style={{padding:"7px 8px",fontFamily:"monospace",color:C.buy}}>+{p.avgWin.toFixed(2)}</td>
-                  <td style={{padding:"7px 8px",fontFamily:"monospace",color:C.high}}>-{p.avgLoss.toFixed(2)}</td>
                   <td style={{padding:"7px 8px",fontFamily:"monospace",fontWeight:700,color:p.netPct>=0?C.buy:C.high}}>{(p.netPct>=0?"+":"")+p.netPct.toFixed(2)}%</td>
+                  <td style={{padding:"7px 8px",fontFamily:"monospace",color:"#93c5fd"}}>{fmtRs(p.investedRs)}</td>
+                  <td style={{padding:"7px 8px",fontFamily:"monospace",fontWeight:700,color:p.profitRs>=0?C.buy:C.high}}>{(p.profitRs>=0?"+":"")+fmtRs(p.profitRs).replace("-","")}</td>
                   <td style={{padding:"7px 8px",color:statusClr,fontWeight:700,fontSize:10}}>{p.status}</td>
-                  <td style={{padding:"7px 8px",fontFamily:"monospace",color:C.muted}}>{p.lastClose ? "₹" + p.lastClose.toFixed(1) : "—"}</td>
                 </tr>;
               })}
             </tbody>
@@ -623,10 +699,10 @@ function ScreenerView(props) {
   ];
 
   function exportScreener() {
-    var data = [["Stock","Status","Detail","Latest Close",period+"D High",period+"D Low","GTT Price","Entry","Target","As of"]];
+    var data = [["Stock","Qty","Status","Detail","Latest Close",period+"D High",period+"D Low","GTT Price","Entry","Target","As of"]];
     rows.forEach(function(r){
       data.push([
-        r.name, r.status, r.detail,
+        r.name, r.qty, r.status, r.detail,
         r.close != null ? r.close.toFixed(2) : "",
         r.d20H != null ? r.d20H.toFixed(2) : "",
         r.d20L != null ? r.d20L.toFixed(2) : "",
@@ -655,21 +731,16 @@ function ScreenerView(props) {
           </button>;
         })}
       </div>
-
       <div style={{display:"flex", gap:6, marginBottom:10, flexWrap:"wrap"}}>
         <ExportBtn label="📥 Export Screener CSV" onClick={exportScreener} />
       </div>
-
-      {filtered.length === 0 && <div style={{...card({padding:30}), textAlign:"center", color:C.muted}}>
-        इस filter में कोई स्टॉक नहीं।
-      </div>}
-
+      {filtered.length === 0 && <div style={{...card({padding:30}), textAlign:"center", color:C.muted}}>इस filter में कोई स्टॉक नहीं।</div>}
       {filtered.length > 0 && <div style={card({overflow:"hidden"})}>
         <div style={{overflowX:"auto"}}>
           <table style={{width:"100%", borderCollapse:"collapse", fontSize:11, minWidth:600}}>
             <thead>
               <tr style={{background:"#0a1626"}}>
-                {["Stock","Status","Detail","Close",period+"D High",period+"D Low","GTT","Target"].map(function(h){
+                {["Stock","Qty","Status","Detail","Close",period+"D High",period+"D Low","GTT","Target"].map(function(h){
                   return <th key={h} style={{padding:"8px", textAlign:"left", color:C.muted, fontWeight:600, borderBottom:"1px solid " + C.border, whiteSpace:"nowrap", fontSize:10}}>{h}</th>;
                 })}
               </tr>
@@ -689,6 +760,7 @@ function ScreenerView(props) {
                 return <tr key={i} style={{background:bg, borderBottom:"1px solid #0d1a2a", cursor:"pointer"}}
                   onClick={function(){ onSelect(r.idx); }}>
                   <td style={{padding:"8px", color:"#93c5fd", fontWeight:600, whiteSpace:"nowrap"}}>{r.name}</td>
+                  <td style={{padding:"8px", fontFamily:"monospace", color:C.text}}>{r.qty}</td>
                   <td style={{padding:"8px", color:statusColor, fontWeight:700, fontSize:10, whiteSpace:"nowrap"}}>{r.label}</td>
                   <td style={{padding:"8px", color:C.muted, fontSize:10}}>{r.detail || "—"}</td>
                   <td style={{padding:"8px", fontFamily:"monospace", color:C.text}}>{fmtN(r.close)}</td>
@@ -710,12 +782,18 @@ function ScreenerView(props) {
   );
 }
 
-// ---------- EXPORT FUNCTIONS ----------
 function exportTrades(stock) {
   if (!stock) return;
-  var rows = [["Stock","Entry Date","Entry Price","Exit Date","Exit Price","Days Held","Pct Gain"]];
+  var q = stock.qty || 1;
+  var rows = [["Stock","Qty","Entry Date","Entry Price","Invested ₹","Exit Date","Exit Price","Returned ₹","Profit ₹","Days Held","Pct Gain"]];
   stock.trades.forEach(function(t){
-    rows.push([stock.name, fmtD(t.entryDate), t.entry.toFixed(2), fmtD(t.exitDate), t.exit.toFixed(2), t.days, t.pct.toFixed(2)]);
+    var cost = q * t.entry;
+    var ret = q * t.exit;
+    rows.push([
+      stock.name, q, fmtD(t.entryDate), t.entry.toFixed(2), cost.toFixed(0),
+      fmtD(t.exitDate), t.exit.toFixed(2), ret.toFixed(0), (ret - cost).toFixed(0),
+      t.days, t.pct.toFixed(2)
+    ]);
   });
   downloadCSV("trades_" + stock.name.replace(/[^a-z0-9]/gi,"_") + "_" + dateStamp() + ".csv", rows);
 }
@@ -741,10 +819,17 @@ function exportTable(stock) {
   downloadCSV("signals_" + stock.name.replace(/[^a-z0-9]/gi,"_") + "_" + dateStamp() + ".csv", rows);
 }
 function exportAllTrades(stocks) {
-  var rows = [["Stock","Entry Date","Entry Price","Exit Date","Exit Price","Days Held","Pct Gain"]];
+  var rows = [["Stock","Qty","Entry Date","Entry Price","Invested ₹","Exit Date","Exit Price","Returned ₹","Profit ₹","Days Held","Pct Gain"]];
   stocks.forEach(function(s){
+    var q = s.qty || 1;
     (s.trades || []).forEach(function(t){
-      rows.push([s.name, fmtD(t.entryDate), t.entry.toFixed(2), fmtD(t.exitDate), t.exit.toFixed(2), t.days, t.pct.toFixed(2)]);
+      var cost = q * t.entry;
+      var ret = q * t.exit;
+      rows.push([
+        s.name, q, fmtD(t.entryDate), t.entry.toFixed(2), cost.toFixed(0),
+        fmtD(t.exitDate), t.exit.toFixed(2), ret.toFixed(0), (ret - cost).toFixed(0),
+        t.days, t.pct.toFixed(2)
+      ]);
     });
   });
   downloadCSV("all_trades_" + dateStamp() + ".csv", rows);
@@ -761,33 +846,28 @@ function exportPortfolioSummary(stocks) {
     ["Wins", stats.wins],
     ["Losses", stats.losses],
     ["Win Rate %", stats.winRate.toFixed(2)],
-    ["Gross Profit %", stats.grossWin.toFixed(2)],
-    ["Gross Loss %", stats.grossLoss.toFixed(2)],
     ["Net Return %", stats.netPct.toFixed(2)],
-    ["Profit Factor", isFinite(stats.profitFactor) ? stats.profitFactor.toFixed(2) : "Inf"],
-    ["Expectancy %", stats.expectancy.toFixed(2)],
-    ["Avg Win %", stats.avgWin.toFixed(2)],
-    ["Avg Loss %", stats.avgLoss.toFixed(2)],
-    ["Avg Hold Days", stats.avgHeldDays.toFixed(2)],
+    ["Total Invested ₹", stats.totalInvestedRs.toFixed(0)],
+    ["Total Returned ₹", stats.totalReturnedRs.toFixed(0)],
+    ["Total Profit ₹", stats.totalProfitRs.toFixed(0)],
     ["Holding Now", stats.openCount],
     ["GTT Active", stats.gttCount],
     ["Idle", stats.idleCount],
     ["", ""],
     ["=== PER STOCK ==="],
-    ["Stock","Trades","Wins","Losses","Win%","Avg Win%","Avg Loss%","Net%","Status","Last Close"]
+    ["Stock","Qty","Trades","Wins","Losses","Win%","Net%","Invested ₹","P&L ₹","Status"]
   ];
   stats.perStock.forEach(function(p){
     rows.push([
-      p.name, p.trades, p.wins, p.losses,
-      p.winRate.toFixed(2), p.avgWin.toFixed(2), p.avgLoss.toFixed(2),
-      p.netPct.toFixed(2), p.status,
-      p.lastClose != null ? p.lastClose.toFixed(2) : ""
+      p.name, p.qty, p.trades, p.wins, p.losses,
+      p.winRate.toFixed(2), p.netPct.toFixed(2),
+      p.investedRs.toFixed(0), p.profitRs.toFixed(0),
+      p.status
     ]);
   });
   downloadCSV("portfolio_summary_" + dateStamp() + ".csv", rows);
 }
 
-// ---------- SETTINGS MODAL ----------
 function SettingsModal(props) {
   var C = props.C;
   var [per, setPer] = React.useState(String(props.period));
@@ -816,44 +896,25 @@ function SettingsModal(props) {
       <div style={{ background:"#0d1a2a", border:"1px solid " + C.border, borderRadius:14, padding:22, width:"100%", maxWidth:420, maxHeight:"90vh", overflowY:"auto" }}>
         <div style={{ fontWeight:700, fontSize:17, marginBottom:6, color:"#c4b5fd" }}>⚙️ Strategy Settings</div>
         <div style={{ fontSize:11, color:C.muted, marginBottom:18, lineHeight:1.6 }}>
-          यहाँ बदलाव करने पर सारे लोडेड स्टॉक्स दोबारा calculate होंगे (same data, नए parameters)।
+          यहाँ बदलाव करने पर सारे लोडेड स्टॉक्स दोबारा calculate होंगे।
         </div>
-
         <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>📅 Period (days)</label>
         <input type="number" min="3" max="500" value={per} onChange={function(e){ setPer(e.target.value); }}
           style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:14, boxSizing:"border-box", marginBottom:12, outline:"none" }} />
-        <div style={{ fontSize:10, color:C.muted, marginTop:-8, marginBottom:14 }}>
-          Default: 20 (उदाहरण: 10, 15, 20, 50, 100)
-        </div>
-
+        <div style={{ fontSize:10, color:C.muted, marginTop:-8, marginBottom:14 }}>Default: 20 (10, 15, 20, 50, 100)</div>
         <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>🎯 Target (%)</label>
         <input type="number" step="0.01" min="0.01" max="100" value={tp} onChange={function(e){ setTp(e.target.value); }}
           style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:14, boxSizing:"border-box", marginBottom:12, outline:"none" }} />
-        <div style={{ fontSize:10, color:C.muted, marginTop:-8, marginBottom:14 }}>
-          Default: 6.28 (उदाहरण: 3, 5, 6.28, 10)
-        </div>
-
+        <div style={{ fontSize:10, color:C.muted, marginTop:-8, marginBottom:14 }}>Default: 6.28</div>
         <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>📏 EPS Tolerance</label>
         <input type="number" step="0.01" min="0" max="10" value={ep} onChange={function(e){ setEp(e.target.value); }}
           style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:14, boxSizing:"border-box", marginBottom:12, outline:"none" }} />
-        <div style={{ fontSize:10, color:C.muted, marginTop:-8, marginBottom:14 }}>
-          Default: 0.03 (price match के लिए छोटा tolerance)
-        </div>
-
+        <div style={{ fontSize:10, color:C.muted, marginTop:-8, marginBottom:14 }}>Default: 0.03</div>
         {err && <div style={{ color:"#f87171", background:"rgba(239,68,68,.1)", border:"1px solid rgba(239,68,68,.3)", borderRadius:8, padding:"8px 12px", fontSize:12, marginBottom:12 }}>{err}</div>}
-
         <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
-          <button onClick={props.onClose}
-            style={{ flex:1, background:C.border, color:C.text, border:"none", borderRadius:10, padding:12, fontSize:13, cursor:"pointer", minWidth:80 }}>Cancel</button>
-          <button onClick={reset}
-            style={{ flex:1, background:"#78350f", color:"#fde68a", border:"none", borderRadius:10, padding:12, fontSize:13, fontWeight:700, cursor:"pointer", minWidth:80 }}>↺ Reset</button>
-          <button onClick={save}
-            style={{ flex:2, background:"#7c3aed", color:"#fff", border:"none", borderRadius:10, padding:12, fontSize:14, fontWeight:700, cursor:"pointer", minWidth:100 }}>💾 Save & Recalculate</button>
-        </div>
-
-        <div style={{ marginTop:14, fontSize:10, color:C.muted, lineHeight:1.7, padding:"8px 10px", background:"#0a1626", borderRadius:8 }}>
-          <b style={{color:"#c4b5fd"}}>Current:</b> Period={props.period}d · Target={(props.targetPct*100).toFixed(2)}% · EPS={props.eps}<br/>
-          <b style={{color:"#c4b5fd"}}>Defaults:</b> {DEFAULT_PERIOD}d · {(DEFAULT_TARGET_PCT*100).toFixed(2)}% · {DEFAULT_EPS}
+          <button onClick={props.onClose} style={{ flex:1, background:C.border, color:C.text, border:"none", borderRadius:10, padding:12, fontSize:13, cursor:"pointer", minWidth:80 }}>Cancel</button>
+          <button onClick={reset} style={{ flex:1, background:"#78350f", color:"#fde68a", border:"none", borderRadius:10, padding:12, fontSize:13, fontWeight:700, cursor:"pointer", minWidth:80 }}>↺ Reset</button>
+          <button onClick={save} style={{ flex:2, background:"#7c3aed", color:"#fff", border:"none", borderRadius:10, padding:12, fontSize:14, fontWeight:700, cursor:"pointer", minWidth:100 }}>💾 Save</button>
         </div>
       </div>
     </div>
@@ -877,7 +938,6 @@ function App() {
   var bprog = React.useState({current:0, total:0, msg:""}); var bulkProg = bprog[0]; var setBulkProg = bprog[1];
   var berr = React.useState([]); var bulkErrors = berr[0]; var setBulkErrors = berr[1];
 
-  // Settings — load from localStorage
   var initSettings = (function(){
     try {
       var raw = localStorage.getItem(SETTINGS_KEY);
@@ -898,9 +958,17 @@ function App() {
     setSheetUrl(u);
     try { localStorage.setItem(SHEET_URL_KEY, u); } catch(e) {}
   }
-
   function persistSettings(p, t, e) {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify({ period: p, targetPct: t, eps: e })); } catch(err) {}
+  }
+
+  function updateQty(idx, newQty) {
+    setStocks(function(p){
+      var copy = p.slice();
+      if (!copy[idx]) return p;
+      copy[idx] = Object.assign({}, copy[idx], { qty: newQty });
+      return copy;
+    });
   }
 
   function handleAdd(csvRaw, lbl) {
@@ -909,8 +977,11 @@ function App() {
     if (parsed.error) { return { error: parsed.error }; }
     var res = calcSignals(parsed.rows, period, targetPct, eps);
     var name = (lbl && lbl.trim()) || parsed.stockName || ("Stock " + (stocks.length + 1));
+    var existing = null;
+    for (var k = 0; k < stocks.length; k++) { if (stocks[k].name === name) { existing = stocks[k]; break; } }
     var newStock = {
       name: name,
+      qty: existing ? (existing.qty || 1) : 1,
       rawRows: parsed.rows,
       rows: res.rows,
       trades: res.trades,
@@ -919,7 +990,7 @@ function App() {
     };
     setStocks(function(p){
       var idx = -1;
-      for (var k = 0; k < p.length; k++) { if (p[k].name === name) { idx = k; break; } }
+      for (var k2 = 0; k2 < p.length; k2++) { if (p[k2].name === name) { idx = k2; break; } }
       if (idx >= 0) {
         var copy = p.slice();
         copy[idx] = newStock;
@@ -937,16 +1008,13 @@ function App() {
     setTargetPct(newTargetPct);
     setEps(newEps);
     persistSettings(newPeriod, newTargetPct, newEps);
-    // Recalculate all stocks using their rawRows
     setStocks(function(prev){
       return prev.map(function(s){
         if (!s.rawRows || s.rawRows.length < newPeriod) return s;
         var res = calcSignals(s.rawRows, newPeriod, newTargetPct, newEps);
         return Object.assign({}, s, {
-          rows: res.rows,
-          trades: res.trades,
-          openPosition: res.openPosition,
-          pendingGtt: res.pendingGtt
+          rows: res.rows, trades: res.trades,
+          openPosition: res.openPosition, pendingGtt: res.pendingGtt
         });
       });
     });
@@ -995,9 +1063,7 @@ function App() {
         var r = await fetchFromYahoo(sym);
         var res = handleAdd(r.csv, r.name);
         if (res.error) errs.push(sym + ": " + res.error);
-      } catch (e) {
-        errs.push(sym + ": " + e.message);
-      }
+      } catch (e) { errs.push(sym + ": " + e.message); }
       await new Promise(function(resolve){ setTimeout(resolve, 400); });
     }
     setBulkProg({current: unique.length, total: unique.length, msg: "पूरा हुआ ✅"});
@@ -1031,8 +1097,15 @@ function App() {
     { key:"portfolio", lbl:"📊 Portfolio" }
   ];
   var events = s ? s.rows.filter(function(r){ return r.events && r.events.length; }) : [];
-
   var isDefaultSettings = (period === DEFAULT_PERIOD && Math.abs(targetPct - DEFAULT_TARGET_PCT) < 1e-9 && Math.abs(eps - DEFAULT_EPS) < 1e-9);
+
+  // Current reference price for qty calc
+  var refPrice = 0;
+  if (s) {
+    if (s.openPosition) refPrice = s.openPosition.entry;
+    else if (s.pendingGtt) refPrice = s.pendingGtt.price;
+    else if (last) refPrice = last.close;
+  }
 
   return (
     <div style={{ fontFamily:"'Inter',system-ui,sans-serif", background:C.bg, color:C.text, minHeight:"100vh", fontSize:14 }}>
@@ -1114,11 +1187,30 @@ function App() {
             </div>;
           })}
         </div>
-        {last && last.d20H && <div style={card({ margin:"0 16px 12px", padding:"10px 16px", display:"flex", gap:12, alignItems:"center", flexWrap:"wrap" })}>
-          <span style={{ fontSize:11, color:C.muted }}>Status ({fmtD(last.date)}):</span>
-          {s.openPosition && <span style={{ background:"#04130b", color:C.buy, border:"1px solid #166534", borderRadius:6, padding:"3px 10px", fontSize:12, fontWeight:700 }}>📈 HOLDING @ ₹{fmtN(s.openPosition.entry)} — Target ₹{fmtN(s.openPosition.target)}</span>}
-          {!s.openPosition && s.pendingGtt && <span style={{ background:"#1c1407", color:C.gtt, border:"1px solid #78350f", borderRadius:6, padding:"3px 10px", fontSize:12, fontWeight:700 }}>🔔 GTT PENDING @ ₹{fmtN(s.pendingGtt.price)}</span>}
-          {!s.openPosition && !s.pendingGtt && <span style={{ color:C.muted, fontSize:12 }}>⏳ IDLE</span>}
+        {last && last.d20H && <div style={card({ margin:"0 16px 12px", padding:"12px 16px", display:"flex", flexDirection:"column", gap:10 })}>
+          <div style={{ display:"flex", gap:12, alignItems:"center", flexWrap:"wrap" }}>
+            <span style={{ fontSize:11, color:C.muted }}>Status ({fmtD(last.date)}):</span>
+            {s.openPosition && <span style={{ background:"#04130b", color:C.buy, border:"1px solid #166534", borderRadius:6, padding:"3px 10px", fontSize:12, fontWeight:700 }}>📈 HOLDING @ ₹{fmtN(s.openPosition.entry)} — Target ₹{fmtN(s.openPosition.target)}</span>}
+            {!s.openPosition && s.pendingGtt && <span style={{ background:"#1c1407", color:C.gtt, border:"1px solid #78350f", borderRadius:6, padding:"3px 10px", fontSize:12, fontWeight:700 }}>🔔 GTT PENDING @ ₹{fmtN(s.pendingGtt.price)}</span>}
+            {!s.openPosition && !s.pendingGtt && <span style={{ color:C.muted, fontSize:12 }}>⏳ IDLE</span>}
+          </div>
+          {refPrice > 0 && <div style={{ display:"flex", flexDirection:"column", gap:8, paddingTop:8, borderTop:"1px solid " + C.border }}>
+            <div style={{ display:"flex", gap:12, alignItems:"center", flexWrap:"wrap" }}>
+              <PositionSizer entry={refPrice} qty={s.qty||1} onChange={function(q){ updateQty(active, q); }} C={C} />
+              <span style={{fontSize:10, color:C.muted}}>ref: ₹{fmtN(refPrice)} {s.openPosition ? "(entry)" : s.pendingGtt ? "(GTT)" : "(close)"}</span>
+            </div>
+            {s.openPosition && (function(){
+              var q = s.qty || 1;
+              var inv = q * s.openPosition.entry;
+              var tgt = q * s.openPosition.target;
+              var pft = tgt - inv;
+              return <div style={{ display:"flex", gap:16, fontSize:12, flexWrap:"wrap" }}>
+                <span style={{color:"#93c5fd"}}>Invested: <b>₹{inv.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
+                <span style={{color:C.gtt}}>Target Value: <b>₹{tgt.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
+                <span style={{color:C.buy}}>Potential Profit: <b>+₹{pft.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
+              </div>;
+            })()}
+          </div>}
         </div>}
         <div style={{ padding:"0 16px 12px", display:"flex", gap:6, overflowX:"auto" }}>
           {views.map(function(v){
@@ -1139,33 +1231,50 @@ function App() {
           </div>
         </div>}
         {view === "trades" && <div style={{ padding:"0 16px 20px", display:"flex", flexDirection:"column", gap:8 }}>
-          <div style={{display:"flex", gap:6, flexWrap:"wrap"}}>
+          <div style={{display:"flex", gap:6, flexWrap:"wrap", alignItems:"center"}}>
             <ExportBtn label="📥 Export Trades CSV" onClick={function(){ exportTrades(s); }} />
+            <span style={{fontSize:11, color:C.muted}}>Qty: <b style={{color:C.text}}>{s.qty||1}</b> (ऊपर status card में बदलें)</span>
           </div>
           {s.trades.length === 0 && !s.openPosition && <div style={{ color:C.muted, textAlign:"center", padding:40 }}>कोई closed trade नहीं।</div>}
           {s.trades.map(function(t,i){
+            var q = s.qty || 1;
+            var inv = q * t.entry;
+            var ret = q * t.exit;
+            var pft = ret - inv;
             return <div key={i} style={{ background:"#04130b", border:"1px solid #166534", borderRadius:10, padding:"10px 14px" }}>
-              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6, flexWrap:"wrap", gap:6 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8, flexWrap:"wrap", gap:6 }}>
                 <span style={{ color:"#86efac", fontWeight:700, fontSize:13 }}>#{s.trades.length-i} — {fmtD(t.entryDate)} → {fmtD(t.exitDate)}</span>
                 <span style={{ background:"#052e16", color:C.buy, border:"1px solid #166534", borderRadius:20, padding:"2px 10px", fontSize:11, fontWeight:700 }}>🎯 +{t.pct.toFixed(2)}%</span>
               </div>
-              <div style={{ display:"flex", gap:20, fontSize:12, color:"#94a3b8", flexWrap:"wrap" }}>
-                <span>Buy @ <b style={{color:C.buy}}>₹{fmtN(t.entry)}</b></span>
-                <span>Exit @ <b style={{color:C.gtt}}>₹{fmtN(t.exit)}</b></span>
-                <span>Held: <b>{t.days}</b> दिन</span>
+              <div style={{ display:"flex", gap:16, fontSize:12, color:"#94a3b8", flexWrap:"wrap", marginBottom:6 }}>
+                <span>Buy: <b style={{color:C.buy}}>₹{fmtN(t.entry)}</b> × <b>{q}</b> = <b style={{color:"#93c5fd"}}>₹{inv.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
+                <span>Exit: <b style={{color:C.gtt}}>₹{fmtN(t.exit)}</b> × <b>{q}</b> = <b style={{color:"#93c5fd"}}>₹{ret.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
+              </div>
+              <div style={{ display:"flex", gap:16, fontSize:12, flexWrap:"wrap" }}>
+                <span style={{color:C.buy, fontWeight:700}}>Profit: +₹{pft.toLocaleString("en-IN", {maximumFractionDigits:0})}</span>
+                <span style={{color:C.muted}}>Held: <b>{t.days}</b> दिन</span>
               </div>
             </div>;
           })}
-          {s.openPosition && <div style={{ background:"#1c1407", border:"1px solid #78350f", borderRadius:10, padding:"10px 14px" }}>
-            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
-              <span style={{ color:"#fde68a", fontWeight:700, fontSize:13 }}>OPEN — {fmtD(s.openPosition.entryDate)}</span>
-              <span style={{ background:"#1c1407", color:C.gtt, border:"1px solid #78350f", borderRadius:20, padding:"2px 10px", fontSize:11, fontWeight:700 }}>⏳ HOLDING</span>
-            </div>
-            <div style={{ display:"flex", gap:20, fontSize:12, color:"#94a3b8", flexWrap:"wrap" }}>
-              <span>Buy @ <b style={{color:C.buy}}>₹{fmtN(s.openPosition.entry)}</b></span>
-              <span>Target @ <b style={{color:C.gtt}}>₹{fmtN(s.openPosition.target)}</b></span>
-            </div>
-          </div>}
+          {s.openPosition && (function(){
+            var q = s.qty || 1;
+            var inv = q * s.openPosition.entry;
+            var tgt = q * s.openPosition.target;
+            var pft = tgt - inv;
+            return <div style={{ background:"#1c1407", border:"1px solid #78350f", borderRadius:10, padding:"10px 14px" }}>
+              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8 }}>
+                <span style={{ color:"#fde68a", fontWeight:700, fontSize:13 }}>OPEN — {fmtD(s.openPosition.entryDate)}</span>
+                <span style={{ background:"#1c1407", color:C.gtt, border:"1px solid #78350f", borderRadius:20, padding:"2px 10px", fontSize:11, fontWeight:700 }}>⏳ HOLDING</span>
+              </div>
+              <div style={{ display:"flex", gap:16, fontSize:12, color:"#94a3b8", flexWrap:"wrap", marginBottom:6 }}>
+                <span>Buy: <b style={{color:C.buy}}>₹{fmtN(s.openPosition.entry)}</b> × <b>{q}</b> = <b style={{color:"#93c5fd"}}>₹{inv.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
+                <span>Target: <b style={{color:C.gtt}}>₹{fmtN(s.openPosition.target)}</b> × <b>{q}</b> = <b style={{color:"#93c5fd"}}>₹{tgt.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
+              </div>
+              <div style={{ display:"flex", gap:16, fontSize:12, flexWrap:"wrap" }}>
+                <span style={{color:C.buy, fontWeight:700}}>Potential Profit: +₹{pft.toLocaleString("en-IN", {maximumFractionDigits:0})}</span>
+              </div>
+            </div>;
+          })()}
         </div>}
         {view === "log" && <div style={{ padding:"0 16px 20px", display:"flex", flexDirection:"column", gap:8 }}>
           {events.length === 0 && <div style={{ color:C.muted, textAlign:"center", padding:40 }}>कोई event नहीं।</div>}
@@ -1283,9 +1392,7 @@ function App() {
             disabled={!!bulkProg.total}
             style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:12, fontFamily:"monospace", resize:"vertical", boxSizing:"border-box", marginBottom:10, outline:"none", opacity: bulkProg.total ? 0.5 : 1 }} />
           {bulkProg.total > 0 && <div style={{ background:"#1e1b4b", border:"1px solid #7c3aed", borderRadius:8, padding:"10px 12px", fontSize:12, marginBottom:12 }}>
-            <div style={{color:"#c4b5fd", fontWeight:700, marginBottom:6}}>
-              Progress: {bulkProg.current}/{bulkProg.total}
-            </div>
+            <div style={{color:"#c4b5fd", fontWeight:700, marginBottom:6}}>Progress: {bulkProg.current}/{bulkProg.total}</div>
             <div style={{background:"#0d1a2a", borderRadius:4, height:8, overflow:"hidden", marginBottom:6}}>
               <div style={{background:"#7c3aed", height:"100%", width: (bulkProg.current/bulkProg.total*100) + "%", transition:"width 0.3s"}}></div>
             </div>
