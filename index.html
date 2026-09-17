@@ -93,20 +93,13 @@ async function fetchFromYahoo(sym) {
   return { csv: lines.join("\n"), name: "NSE:" + clean };
 }
 
-// नया fetchFromSheet: तीनों तरह के URLs हैंडल करता है
-//  1. Google Apps Script JSON API
-//  2. Publish-to-web CSV (सीधा fetch)
-//  3. Publish-to-web CSV (proxy के जरिए)
 async function fetchFromSheet(url) {
   const trimmed = url.trim();
-
-  // Step 1: सीधे fetch करके देखें (Apps Script JSON या direct CSV)
   try {
     const direct = await fetch(trimmed);
     if (direct.ok) {
       const text = await direct.text();
       if (text && text.length > 20) {
-        // अगर JSON array है (Apps Script से) तो उसे CSV में बदलें
         try {
           const json = JSON.parse(text);
           if (Array.isArray(json) && json.length > 1) {
@@ -121,19 +114,13 @@ async function fetchFromSheet(url) {
               return { csv: lines.join("\n"), name: "" };
             }
           }
-        } catch (e) { /* JSON नहीं है, CSV हो सकता है */ }
-
-        // अगर CSV लगता है
+        } catch (e) {}
         if (text.indexOf("Date") !== -1) return { csv: text, name: "" };
       }
     }
-  } catch (e) { /* CORS block, proxy से try करेंगे */ }
-
-  // Step 2: Proxy के जरिए try करें
+  } catch (e) {}
   const text = await fetchViaProxy(trimmed);
   if (!text || text.length < 20) throw new Error("खाली response मिला");
-
-  // अगर JSON आया है तो CSV में बदलें
   try {
     const json = JSON.parse(text);
     if (Array.isArray(json) && json.length > 1) {
@@ -148,9 +135,8 @@ async function fetchFromSheet(url) {
         return { csv: lines.join("\n"), name: "" };
       }
     }
-  } catch (e) { /* JSON नहीं, CSV */ }
-
-  if (text.indexOf("Date") === -1) throw new Error("Sheet में Date column नहीं मिला। कृपया 'Publish to web' CSV लिंक या Apps Script URL इस्तेमाल करें।");
+  } catch (e) {}
+  if (text.indexOf("Date") === -1) throw new Error("Sheet में Date column नहीं मिला।");
   return { csv: text, name: "" };
 }
 
@@ -312,29 +298,38 @@ const NIFTY200 = [
 
 function MiniChart(props) {
   var rows = props.rows;
-  var height = props.height || 280;
+  var chartType = props.chartType || "candle";
+  var height = props.height || 320;
   var hov = React.useState(null); var hover = hov[0]; var setHover = hov[1];
   var W = 800, H = height, PAD = { l:50, r:10, t:20, b:30 };
   var iw = W - PAD.l - PAD.r;
   var ih = H - PAD.t - PAD.b;
   var data = rows.filter(function(r){ return r.d20H != null; });
   if (!data.length) return null;
+
   var allVals = [];
-  data.forEach(function(r){ allVals.push(r.close, r.d20H, r.d20L); });
+  data.forEach(function(r){ allVals.push(r.close, r.d20H, r.d20L, r.high, r.low); });
   var minV = Math.min.apply(null, allVals);
   var maxV = Math.max.apply(null, allVals);
   var range = (maxV - minV) || 1;
   var minT = data[0].ts, maxT = data[data.length-1].ts;
   var x = function(ts){ return PAD.l + ((ts - minT) / (maxT - minT)) * iw; };
   var y = function(v){ return PAD.t + ih - ((v - minV) / range) * ih; };
+
+  // candle width calculation
+  var slot = iw / data.length;
+  var bodyW = Math.max(1, Math.min(10, slot * 0.7));
+
   var line = function(key){
     return data.map(function(r,i){ return (i?'L':'M') + x(r.ts).toFixed(1) + "," + y(r[key]).toFixed(1); }).join(" ");
   };
+
   var yLabels = [];
   for (var i = 0; i <= 4; i++) yLabels.push(minV + (range*i/4));
   var xticks = Math.min(6, data.length);
   var xIdx = [];
   for (var j = 0; j < xticks; j++) xIdx.push(Math.floor(j*(data.length-1)/(xticks-1||1)));
+
   return (
     <div style={{overflowX:"auto"}}>
       <svg viewBox={"0 0 " + W + " " + H} style={{width:"100%",minWidth:340,height:height,display:"block"}}>
@@ -349,24 +344,42 @@ function MiniChart(props) {
             {(data[idx].date.getMonth()+1) + "/" + String(data[idx].date.getFullYear()).slice(2)}
           </text>;
         })}
+
+        {chartType === "candle" && data.map(function(r, k){
+          var cx = x(r.ts);
+          var up = r.close >= r.open;
+          var col = up ? "#22c55e" : "#ef4444";
+          var top = up ? y(r.close) : y(r.open);
+          var bot = up ? y(r.open) : y(r.close);
+          var bh = Math.max(1, bot - top);
+          return <g key={"c"+k}>
+            <line x1={cx} x2={cx} y1={y(r.high)} y2={y(r.low)} stroke={col} strokeWidth="1" />
+            <rect x={cx - bodyW/2} y={top} width={bodyW} height={bh} fill={col} stroke={col} strokeWidth="0.5" />
+          </g>;
+        })}
+
+        {chartType === "line" && <path d={line("close")} fill="none" stroke="#60a5fa" strokeWidth="2" />}
+
         <path d={line("d20H")} fill="none" stroke="#f87171" strokeWidth="1.2" strokeDasharray="5 3" />
         <path d={line("d20L")} fill="none" stroke="#34d399" strokeWidth="1.2" strokeDasharray="5 3" />
-        <path d={line("close")} fill="none" stroke="#60a5fa" strokeWidth="2" />
+
         {data.map(function(r,k){
           var ev = r.events || [];
-          if (ev.indexOf("target") >= 0) return <circle key={"t"+k} cx={x(r.ts)} cy={y(r.close)} r="5" fill="#fbbf24" stroke="#1c1407" strokeWidth="1.5" />;
-          if (ev.indexOf("buy") >= 0) return <circle key={"b"+k} cx={x(r.ts)} cy={y(r.close)} r="5" fill="#4ade80" stroke="#052e16" strokeWidth="1.5" />;
-          if (ev.indexOf("gtt-placed") >= 0) return <circle key={"g"+k} cx={x(r.ts)} cy={y(r.close)} r="3" fill="#fbbf24" />;
+          if (ev.indexOf("target") >= 0) return <circle key={"t"+k} cx={x(r.ts)} cy={y(r.high)} r="5" fill="#fbbf24" stroke="#1c1407" strokeWidth="1.5" />;
+          if (ev.indexOf("buy") >= 0) return <circle key={"b"+k} cx={x(r.ts)} cy={y(r.low)} r="5" fill="#4ade80" stroke="#052e16" strokeWidth="1.5" />;
+          if (ev.indexOf("gtt-placed") >= 0) return <circle key={"g"+k} cx={x(r.ts)} cy={y(r.low)} r="3" fill="#fbbf24" />;
           return null;
         })}
+
         {data.map(function(r,k){
-          return <rect key={k} x={x(r.ts)-4} y={PAD.t} width="8" height={ih} fill="transparent"
+          return <rect key={k} x={x(r.ts)-slot/2} y={PAD.t} width={slot} height={ih} fill="transparent"
             onMouseEnter={function(){setHover(r);}} onTouchStart={function(){setHover(r);}} />;
         })}
       </svg>
       {hover && <div style={{background:"#0f1e33",border:"1px solid #2a3f5f",borderRadius:8,padding:"8px 12px",fontSize:11,lineHeight:1.7,fontFamily:"monospace",margin:"4px 10px"}}>
         <div style={{fontWeight:700,color:"#a0bde0"}}>{fmtD(hover.date)}</div>
-        <div style={{color:"#60a5fa"}}>Close: ₹{fmtN(hover.close)}</div>
+        <div style={{color:"#94a3b8"}}>O: ₹{fmtN(hover.open)} &nbsp; H: ₹{fmtN(hover.high)}</div>
+        <div style={{color:"#94a3b8"}}>L: ₹{fmtN(hover.low)} &nbsp; C: ₹{fmtN(hover.close)}</div>
         <div style={{color:"#f87171"}}>20D High: ₹{fmtN(hover.d20H)}</div>
         <div style={{color:"#34d399"}}>20D Low: ₹{fmtN(hover.d20L)}</div>
         {hover.gttPrice && !(hover.events||[]).includes("buy") && <div style={{color:"#fbbf24",fontWeight:700}}>🔔 GTT Pending @ ₹{fmtN(hover.gttPrice)}</div>}
@@ -375,7 +388,8 @@ function MiniChart(props) {
         {(hover.events||[]).includes("target") && <div style={{color:"#fbbf24",fontWeight:700}}>🎯 TARGET HIT</div>}
       </div>}
       <div style={{padding:"4px 14px",fontSize:11,color:"#64748b"}}>
-        <span style={{color:"#60a5fa"}}>━ Close</span> &nbsp;
+        {chartType === "candle" && <><span style={{color:"#22c55e"}}>■ Up</span> &nbsp; <span style={{color:"#ef4444"}}>■ Down</span> &nbsp;</>}
+        {chartType === "line" && <><span style={{color:"#60a5fa"}}>━ Close</span> &nbsp;</>}
         <span style={{color:"#f87171"}}>┄ 20D High</span> &nbsp;
         <span style={{color:"#34d399"}}>┄ 20D Low</span> &nbsp;
         <span style={{color:"#4ade80"}}>● Buy</span> &nbsp;
@@ -461,6 +475,7 @@ function App() {
   var er = React.useState(""); var err = er[0]; var setErr = er[1];
   var lo = React.useState(""); var loading = lo[0]; var setLoading = lo[1];
   var vw = React.useState("chart"); var view = vw[0]; var setView = vw[1];
+  var ch = React.useState("candle"); var chartType = ch[0]; var setChartType = ch[1];
   var su = React.useState(function(){ try { return localStorage.getItem(SHEET_URL_KEY) || ""; } catch(e) { return ""; } });
   var sheetUrl = su[0]; var setSheetUrl = su[1];
 
@@ -617,8 +632,14 @@ function App() {
         </div>
         {view === "chart" && <div style={{ padding:"0 10px 20px" }}>
           <div style={card({ padding:"10px 0" })}>
-            <div style={{ paddingLeft:14, fontSize:12, color:C.muted, marginBottom:6 }}>{s.name} — Close + 20D Bands</div>
-            <MiniChart rows={s.rows} />
+            <div style={{ paddingLeft:14, paddingRight:14, fontSize:12, color:C.muted, marginBottom:6, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+              <span style={{flex:1}}>{s.name} — {chartType === "candle" ? "Candlestick" : "Line"} + 20D Bands</span>
+              <div style={{display:"flex", gap:4}}>
+                <button onClick={function(){ setChartType("candle"); }} style={{ background: chartType==="candle" ? C.accent : "none", color: chartType==="candle" ? "#fff" : C.muted, border: "1px solid " + (chartType==="candle" ? C.accent : C.border), borderRadius:6, padding:"4px 10px", fontSize:11, cursor:"pointer", fontWeight: chartType==="candle" ? 700 : 400 }}>🕯 Candle</button>
+                <button onClick={function(){ setChartType("line"); }} style={{ background: chartType==="line" ? C.accent : "none", color: chartType==="line" ? "#fff" : C.muted, border: "1px solid " + (chartType==="line" ? C.accent : C.border), borderRadius:6, padding:"4px 10px", fontSize:11, cursor:"pointer", fontWeight: chartType==="line" ? 700 : 400 }}>📈 Line</button>
+              </div>
+            </div>
+            <MiniChart rows={s.rows} chartType={chartType} />
           </div>
         </div>}
         {view === "trades" && <div style={{ padding:"0 16px 20px", display:"flex", flexDirection:"column", gap:8 }}>
@@ -718,10 +739,6 @@ function App() {
               style={{ width:"100%", background:"#16a34a", color:"#fff", border:"none", borderRadius:8, padding:11, fontSize:14, fontWeight:700, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
               {loading ? "⏳ " + loading : "🔄 Sheet से Load करो"}
             </button>
-            <div style={{fontSize:10,color:"#86efac",marginTop:8,lineHeight:1.6}}>
-              💡 <b>Tip:</b> अगर पुराना CSV लिंक काम नहीं कर रहा, तो Apps Script वाला URL डालें।<br/>
-              या Sheet से CSV डाउनलोड करके नीचे "Manual CSV" में पेस्ट/अपलोड करें।
-            </div>
           </div>
 
           <div style={{ textAlign:"center", fontSize:11, color:C.muted, marginBottom:12 }}>─── या ───</div>
