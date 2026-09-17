@@ -49,9 +49,10 @@ function parseDateCell(s) {
 
 async function fetchViaProxy(url) {
   const proxies = [
-    "https://corsproxy.io/?url=" + encodeURIComponent(url),
     "https://api.allorigins.win/raw?url=" + encodeURIComponent(url),
-    "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(url),
+    "https://api.cors.lol/?url=" + encodeURIComponent(url),
+    "https://thingproxy.freeboard.io/fetch/" + url,
+    "https://proxy.cors.sh/" + url
   ];
   let lastErr = "";
   for (let i = 0; i < proxies.length; i++) {
@@ -59,7 +60,7 @@ async function fetchViaProxy(url) {
       const res = await fetch(proxies[i]);
       if (!res.ok) { lastErr = "HTTP " + res.status; continue; }
       const text = await res.text();
-      if (text && text.length > 50) return text;
+      if (text && text.length > 20) return text;
     } catch (e) { lastErr = e.message; }
   }
   throw new Error("Data नहीं मिला (" + lastErr + ")");
@@ -92,16 +93,64 @@ async function fetchFromYahoo(sym) {
   return { csv: lines.join("\n"), name: "NSE:" + clean };
 }
 
+// नया fetchFromSheet: तीनों तरह के URLs हैंडल करता है
+//  1. Google Apps Script JSON API
+//  2. Publish-to-web CSV (सीधा fetch)
+//  3. Publish-to-web CSV (proxy के जरिए)
 async function fetchFromSheet(url) {
+  const trimmed = url.trim();
+
+  // Step 1: सीधे fetch करके देखें (Apps Script JSON या direct CSV)
   try {
-    const direct = await fetch(url);
+    const direct = await fetch(trimmed);
     if (direct.ok) {
       const text = await direct.text();
-      if (text.indexOf("Date") !== -1) return { csv: text, name: "" };
+      if (text && text.length > 20) {
+        // अगर JSON array है (Apps Script से) तो उसे CSV में बदलें
+        try {
+          const json = JSON.parse(text);
+          if (Array.isArray(json) && json.length > 1) {
+            const lines = json.map(function(row){
+              return (Array.isArray(row) ? row : [row]).map(function(cell){
+                if (cell == null) return "";
+                const s = String(cell);
+                return s.indexOf(",") >= 0 ? '"' + s.replace(/"/g, '""') + '"' : s;
+              }).join(",");
+            });
+            if (lines.join("\n").indexOf("Date") !== -1) {
+              return { csv: lines.join("\n"), name: "" };
+            }
+          }
+        } catch (e) { /* JSON नहीं है, CSV हो सकता है */ }
+
+        // अगर CSV लगता है
+        if (text.indexOf("Date") !== -1) return { csv: text, name: "" };
+      }
     }
-  } catch (e) {}
-  const text = await fetchViaProxy(url);
-  if (text.indexOf("Date") === -1) throw new Error("Sheet में Date column नहीं मिला");
+  } catch (e) { /* CORS block, proxy से try करेंगे */ }
+
+  // Step 2: Proxy के जरिए try करें
+  const text = await fetchViaProxy(trimmed);
+  if (!text || text.length < 20) throw new Error("खाली response मिला");
+
+  // अगर JSON आया है तो CSV में बदलें
+  try {
+    const json = JSON.parse(text);
+    if (Array.isArray(json) && json.length > 1) {
+      const lines = json.map(function(row){
+        return (Array.isArray(row) ? row : [row]).map(function(cell){
+          if (cell == null) return "";
+          const s = String(cell);
+          return s.indexOf(",") >= 0 ? '"' + s.replace(/"/g, '""') + '"' : s;
+        }).join(",");
+      });
+      if (lines.join("\n").indexOf("Date") !== -1) {
+        return { csv: lines.join("\n"), name: "" };
+      }
+    }
+  } catch (e) { /* JSON नहीं, CSV */ }
+
+  if (text.indexOf("Date") === -1) throw new Error("Sheet में Date column नहीं मिला। कृपया 'Publish to web' CSV लिंक या Apps Script URL इस्तेमाल करें।");
   return { csv: text, name: "" };
 }
 
@@ -663,12 +712,16 @@ function App() {
             <input
               value={sheetUrl}
               onChange={function(e){ saveSheetUrl(e.target.value); }}
-              placeholder="Sheet की published CSV URL"
+              placeholder="Sheet की published CSV URL या Apps Script URL"
               style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:11, fontFamily:"monospace", boxSizing:"border-box", marginBottom:10, outline:"none" }} />
             <button onClick={loadFromSheet} disabled={!!loading}
               style={{ width:"100%", background:"#16a34a", color:"#fff", border:"none", borderRadius:8, padding:11, fontSize:14, fontWeight:700, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
               {loading ? "⏳ " + loading : "🔄 Sheet से Load करो"}
             </button>
+            <div style={{fontSize:10,color:"#86efac",marginTop:8,lineHeight:1.6}}>
+              💡 <b>Tip:</b> अगर पुराना CSV लिंक काम नहीं कर रहा, तो Apps Script वाला URL डालें।<br/>
+              या Sheet से CSV डाउनलोड करके नीचे "Manual CSV" में पेस्ट/अपलोड करें।
+            </div>
           </div>
 
           <div style={{ textAlign:"center", fontSize:11, color:C.muted, marginBottom:12 }}>─── या ───</div>
