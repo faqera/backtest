@@ -36,8 +36,8 @@ function fmtRs(v) {
   if (v == null || isNaN(v)) return "—";
   var n = Number(v);
   var sign = n < 0 ? "-" : "";
-  n = Math.abs(n);
-  return sign + "₹" + n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+  n = Math.abs(Math.round(n));
+  return sign + "₹" + n.toLocaleString("en-IN");
 }
 function csvEsc(v) {
   if (v == null) return "";
@@ -347,6 +347,64 @@ function calcPortfolioStats(stocks) {
   };
 }
 
+// NEW: Equity Curve calculation
+function calcEquityCurve(stocks) {
+  if (!stocks || !stocks.length) return null;
+  var allTrades = [];
+  for (var i = 0; i < stocks.length; i++) {
+    var s = stocks[i];
+    var q = s.qty || 1;
+    var trades = s.trades || [];
+    for (var j = 0; j < trades.length; j++) {
+      var t = trades[j];
+      var profit = q * (t.exit - t.entry);
+      allTrades.push({
+        ts: t.exitDate.getTime(),
+        date: t.exitDate,
+        profit: profit,
+        stock: s.name,
+        entry: t.entry,
+        exit: t.exit,
+        qty: q
+      });
+    }
+  }
+  if (!allTrades.length) return null;
+  allTrades.sort(function(a,b){ return a.ts - b.ts; });
+  var pts = [];
+  var cum = 0, peak = 0, maxDD = 0, maxDDPeak = 0, maxDDTrough = 0;
+  for (var k = 0; k < allTrades.length; k++) {
+    cum += allTrades[k].profit;
+    if (cum > peak) peak = cum;
+    var dd = peak - cum;
+    if (dd > maxDD) {
+      maxDD = dd;
+      maxDDPeak = peak;
+      maxDDTrough = cum;
+    }
+    pts.push({
+      ts: allTrades[k].ts,
+      date: allTrades[k].date,
+      profit: allTrades[k].profit,
+      cum: cum,
+      peak: peak,
+      dd: dd,
+      stock: allTrades[k].stock
+    });
+  }
+  return {
+    points: pts,
+    allTrades: allTrades,
+    maxDrawdown: maxDD,
+    peakEquity: peak,
+    finalEquity: cum,
+    totalProfit: cum,
+    tradeCount: allTrades.length,
+    maxDDPeak: maxDDPeak,
+    maxDDTrough: maxDDTrough
+  };
+}
+
 function calcScreenerRow(stock) {
   var rows = stock.rows;
   var last = rows[rows.length - 1];
@@ -373,9 +431,7 @@ function calcScreenerRow(stock) {
     if (re.indexOf("buy") >= 0) {
       var ago = rows.length - 1 - i;
       if (ago <= 1) {
-        status = "BUY_TODAY";
-        label = "✅ BUY";
-        priority = 0;
+        status = "BUY_TODAY"; label = "✅ BUY"; priority = 0;
         detail = "Buy @ ₹" + fmtN(r.gttPrice) + " (" + (ago === 0 ? "आज" : "कल") + ")";
       }
       break;
@@ -383,9 +439,7 @@ function calcScreenerRow(stock) {
     if (re.indexOf("target") >= 0) {
       var ago2 = rows.length - 1 - i;
       if (ago2 <= 1) {
-        status = "TARGET_TODAY";
-        label = "🎯 TARGET";
-        priority = 0;
+        status = "TARGET_TODAY"; label = "🎯 TARGET"; priority = 0;
         detail = "Target hit (" + (ago2 === 0 ? "आज" : "कल") + ")";
       }
       break;
@@ -393,28 +447,20 @@ function calcScreenerRow(stock) {
     if (re.indexOf("gtt-placed") >= 0) {
       var ago3 = rows.length - 1 - i;
       if (ago3 <= 1 && status === "IDLE") {
-        status = "NEW_LOW";
-        label = "🆕 New Low";
-        priority = 1;
+        status = "NEW_LOW"; label = "🆕 New Low"; priority = 1;
         detail = "नया Low → GTT लगा";
       }
       break;
     }
   }
-
   if (last.newLow && !stock.openPosition && stock.pendingGtt) {
-    status = "NEW_LOW";
-    label = "🆕 New Low";
-    priority = 1;
+    status = "NEW_LOW"; label = "🆕 New Low"; priority = 1;
     detail = "आज नया Low → GTT @ ₹" + fmtN(stock.pendingGtt.price);
   }
-
   return {
     name: stock.name, status: status, label: label, priority: priority,
     detail: detail,
-    close: last.close,
-    d20H: last.d20H,
-    d20L: last.d20L,
+    close: last.close, d20H: last.d20H, d20L: last.d20L,
     date: last.date,
     gtt: stock.pendingGtt ? stock.pendingGtt.price : null,
     target: stock.openPosition ? stock.openPosition.target : null,
@@ -520,6 +566,131 @@ function MiniChart(props) {
   );
 }
 
+// ---------- EQUITY CURVE CHART ----------
+function EquityCurveChart(props) {
+  var data = props.data;
+  var height = props.height || 280;
+  if (!data || !data.points.length) {
+    return <div style={{padding:30, textAlign:"center", color:"#64748b", fontSize:12}}>
+      कोई closed trade नहीं — equity curve के लिए कम से कम 1 trade चाहिए।
+    </div>;
+  }
+  var hov = React.useState(null); var hover = hov[0]; var setHover = hov[1];
+  var W = 800, H = height, PAD = { l:75, r:15, t:22, b:30 };
+  var iw = W - PAD.l - PAD.r;
+  var ih = H - PAD.t - PAD.b;
+
+  var pts = data.points;
+  // Add initial zero point for smoother start
+  var firstTs = pts[0].ts;
+  var zeroTs = firstTs - 7 * 86400000; // 7 days before first trade
+  var extended = [{ts: zeroTs, date: new Date(zeroTs), cum: 0, profit: 0, peak: 0, dd: 0, isStart: true, stock: "Start"}].concat(pts);
+
+  var minTs = extended[0].ts;
+  var maxTs = extended[extended.length-1].ts;
+  if (maxTs <= minTs) maxTs = minTs + 86400000;
+
+  var cums = extended.map(function(p){ return p.cum; });
+  var minV = Math.min.apply(null, cums);
+  var maxV = Math.max.apply(null, cums);
+  minV = Math.min(minV, 0);
+  maxV = Math.max(maxV, 0);
+  if (minV === maxV) { minV -= 100; maxV += 100; }
+  var pad = (maxV - minV) * 0.12;
+  minV -= pad;
+  maxV += pad;
+  var range = maxV - minV;
+
+  var x = function(ts){ return PAD.l + ((ts - minTs) / (maxTs - minTs)) * iw; };
+  var y = function(v){ return PAD.t + ih - ((v - minV) / range) * ih; };
+
+  var linePath = extended.map(function(p, i){ return (i?'L':'M') + x(p.ts).toFixed(1) + "," + y(p.cum).toFixed(1); }).join(" ");
+  var areaPath = linePath + " L " + x(maxTs).toFixed(1) + "," + y(0).toFixed(1) + " L " + x(minTs).toFixed(1) + "," + y(0).toFixed(1) + " Z";
+
+  var yLabels = [];
+  for (var i = 0; i <= 4; i++) yLabels.push(minV + (range*i/4));
+
+  var xticks = Math.min(6, extended.length);
+  var xIdx = [];
+  for (var j = 0; j < xticks; j++) xIdx.push(Math.floor(j*(extended.length-1)/(xticks-1||1)));
+
+  // Peak
+  var peakIdx = 0;
+  for (var k = 1; k < extended.length; k++) {
+    if (extended[k].cum > extended[peakIdx].cum) peakIdx = k;
+  }
+  // Max DD trough
+  var troughIdx = -1;
+  if (data.maxDrawdown > 0) {
+    for (var m = 0; m < extended.length; m++) {
+      if (extended[m].dd === data.maxDrawdown) { troughIdx = m; break; }
+    }
+  }
+
+  var finalCum = pts[pts.length-1].cum;
+  var lineCol = finalCum >= 0 ? "#4ade80" : "#f87171";
+  var fillCol = finalCum >= 0 ? "rgba(74,222,128,0.10)" : "rgba(248,113,113,0.10)";
+
+  return (
+    <div style={{overflowX:"auto"}}>
+      <svg viewBox={"0 0 " + W + " " + H} style={{width:"100%", minWidth:340, height:height, display:"block"}}>
+        {yLabels.map(function(v,k){
+          return <g key={k}>
+            <line x1={PAD.l} x2={W-PAD.r} y1={y(v)} y2={y(v)} stroke="#101f35" strokeDasharray="3 3" />
+            <text x={PAD.l-4} y={y(v)+3} fill="#334a6a" fontSize="10" textAnchor="end">{fmtRs(v)}</text>
+          </g>;
+        })}
+        {minV <= 0 && maxV >= 0 && <line x1={PAD.l} x2={W-PAD.r} y1={y(0)} y2={y(0)} stroke="#475569" strokeWidth="1" strokeDasharray="2 3" />}
+
+        <path d={areaPath} fill={fillCol} />
+        <path d={linePath} fill="none" stroke={lineCol} strokeWidth="2.2" strokeLinejoin="round" />
+
+        {extended.map(function(p, k){
+          if (p.isStart) return null;
+          return <circle key={k} cx={x(p.ts)} cy={y(p.cum)} r="2.5" fill={lineCol} />;
+        })}
+
+        {peakIdx > 0 && <g>
+          <circle cx={x(extended[peakIdx].ts)} cy={y(extended[peakIdx].cum)} r="5" fill="#4ade80" stroke="#052e16" strokeWidth="1.5" />
+          <text x={x(extended[peakIdx].ts)} y={y(extended[peakIdx].cum) - 8} fill="#4ade80" fontSize="9" textAnchor="middle" fontWeight="700">PEAK</text>
+        </g>}
+
+        {troughIdx > 0 && <g>
+          <circle cx={x(extended[troughIdx].ts)} cy={y(extended[troughIdx].cum)} r="5" fill="#f87171" stroke="#450a0a" strokeWidth="1.5" />
+          <text x={x(extended[troughIdx].ts)} y={y(extended[troughIdx].cum) + 14} fill="#f87171" fontSize="9" textAnchor="middle" fontWeight="700">MAX DD</text>
+        </g>}
+
+        {xIdx.map(function(idx,k){
+          return <text key={k} x={x(extended[idx].ts)} y={H-10} fill="#334a6a" fontSize="9" textAnchor="middle">
+            {(extended[idx].date.getMonth()+1) + "/" + String(extended[idx].date.getFullYear()).slice(2)}
+          </text>;
+        })}
+
+        {extended.map(function(p, k){
+          if (p.isStart) return null;
+          return <rect key={"h"+k} x={x(p.ts)-8} y={PAD.t} width="16" height={ih} fill="transparent"
+            onMouseEnter={function(){setHover(p);}} onTouchStart={function(){setHover(p);}} />;
+        })}
+      </svg>
+
+      {hover && <div style={{background:"#0f1e33",border:"1px solid #2a3f5f",borderRadius:8,padding:"8px 12px",fontSize:11,lineHeight:1.7,fontFamily:"monospace",margin:"4px 10px"}}>
+        <div style={{fontWeight:700,color:"#a0bde0"}}>{fmtD(hover.date)}</div>
+        <div style={{color:"#93c5fd"}}>{hover.stock}</div>
+        {!hover.isStart && <div style={{color:"#94a3b8"}}>Trade: <b style={{color: hover.profit>=0?"#4ade80":"#f87171"}}>{hover.profit>=0?"+":""}{fmtRs(hover.profit)}</b></div>}
+        <div style={{color: lineCol, fontWeight:700}}>Cumulative: {hover.cum>=0?"+":""}{fmtRs(hover.cum)}</div>
+        {hover.dd > 0 && <div style={{color:"#f87171"}}>Drawdown: -{fmtRs(hover.dd)}</div>}
+      </div>}
+
+      <div style={{padding:"6px 14px", fontSize:11, color:"#64748b", display:"flex", gap:14, flexWrap:"wrap"}}>
+        <span>Final: <b style={{color: lineCol}}>{finalCum>=0?"+":""}{fmtRs(finalCum)}</b></span>
+        <span>Peak: <b style={{color:"#4ade80"}}>{fmtRs(data.peakEquity)}</b></span>
+        <span>Max DD: <b style={{color:"#f87171"}}>-{fmtRs(data.maxDrawdown)}</b></span>
+        <span>Trades: <b style={{color:"#93c5fd"}}>{data.tradeCount}</b></span>
+      </div>
+    </div>
+  );
+}
+
 function ExportBtn(props) {
   return <button onClick={props.onClick}
     style={{ background:"#0369a1", color:"#fff", border:"none", borderRadius:8, padding:"6px 12px", fontSize:12, fontWeight:700, cursor:"pointer", whiteSpace:"nowrap" }}>
@@ -527,7 +698,6 @@ function ExportBtn(props) {
   </button>;
 }
 
-// ---------- POSITION SIZER ----------
 function PositionSizer(props) {
   var entry = props.entry || 0;
   var qty = props.qty || 0;
@@ -581,6 +751,7 @@ function PortfolioView(props) {
   var stocks = props.stocks;
   var onSelect = props.onSelect;
   var stats = calcPortfolioStats(stocks);
+  var equity = calcEquityCurve(stocks);
   var C = { card:"#0f1e33", border:"#1e3352", muted:"#64748b", buy:"#4ade80", high:"#f87171", gtt:"#fbbf24", dim:"#4a6fa5", text:"#dce8f8" };
   var card = function(sx){ return Object.assign({ background:C.card, border:"1px solid " + C.border, borderRadius:10 }, sx || {}); };
   if (!stats) return <div style={{padding:40,textAlign:"center",color:C.muted}}>कोई स्टॉक नहीं।</div>;
@@ -593,9 +764,10 @@ function PortfolioView(props) {
     { lbl:"Invested ₹", val: fmtRs(stats.totalInvestedRs), clr:"#93c5fd" },
     { lbl:"Total P&L ₹", val: (stats.totalProfitRs >= 0 ? "+" : "") + fmtRs(stats.totalProfitRs).replace("-",""), clr: stats.totalProfitRs >= 0 ? C.buy : C.high },
     { lbl:"Returned ₹", val: fmtRs(stats.totalReturnedRs), clr:C.text },
+    { lbl:"Peak Equity", val: equity ? (equity.peakEquity >= 0 ? "+" : "") + fmtRs(equity.peakEquity).replace("-","") : "—", clr:"#4ade80" },
+    { lbl:"Max Drawdown", val: equity ? "-" + fmtRs(equity.maxDrawdown) : "—", clr:C.high },
     { lbl:"Holding", val: stats.openCount, clr:C.gtt },
-    { lbl:"GTT Active", val: stats.gttCount, clr:C.gtt },
-    { lbl:"Idle", val: stats.idleCount, clr:C.muted }
+    { lbl:"GTT Active", val: stats.gttCount, clr:C.gtt }
   ];
   return (
     <div style={{padding:"0 16px 20px"}}>
@@ -603,6 +775,16 @@ function PortfolioView(props) {
         <ExportBtn label="📥 Portfolio Summary" onClick={function(){ exportPortfolioSummary(stocks); }} />
         <ExportBtn label="📥 All Trades" onClick={function(){ exportAllTrades(stocks); }} />
       </div>
+
+      {/* Equity Curve Section */}
+      <div style={card({ padding:"10px 0", marginBottom:14 })}>
+        <div style={{paddingLeft:14, paddingRight:14, fontSize:12, color:C.muted, marginBottom:6, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
+          <span style={{flex:1}}>📈 Equity Curve — Cumulative P&L (₹)</span>
+          {equity && <span style={{fontSize:10, color:C.muted}}>{equity.tradeCount} trades · {equity.points.length} points</span>}
+        </div>
+        <EquityCurveChart data={equity} />
+      </div>
+
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(95px,1fr))",gap:8,marginBottom:14}}>
         {statCards.map(function(c,i){
           return <div key={i} style={card({padding:"10px 12px",textAlign:"center"})}>
@@ -661,25 +843,21 @@ function ScreenerView(props) {
       <div>पहले कुछ स्टॉक्स लोड करें — फिर यहाँ स्क्रीनर दिखेगा।</div>
     </div>;
   }
-
   var rows = stocks.map(function(s, idx){
     var r = calcScreenerRow(s);
     r.idx = idx;
     return r;
   });
-
   rows.sort(function(a,b){
     if (a.priority !== b.priority) return a.priority - b.priority;
     return a.name.localeCompare(b.name);
   });
-
   var filtered = rows;
   if (filter === "buy") filtered = rows.filter(function(r){ return r.status === "BUY_TODAY"; });
   else if (filter === "gtt") filtered = rows.filter(function(r){ return r.status === "GTT" || r.status === "NEW_LOW"; });
   else if (filter === "holding") filtered = rows.filter(function(r){ return r.status === "HOLDING"; });
   else if (filter === "newlow") filtered = rows.filter(function(r){ return r.status === "NEW_LOW"; });
   else if (filter === "target") filtered = rows.filter(function(r){ return r.status === "TARGET_TODAY"; });
-
   var counts = {
     all: rows.length,
     buy: rows.filter(function(r){ return r.status === "BUY_TODAY"; }).length,
@@ -688,7 +866,6 @@ function ScreenerView(props) {
     newlow: rows.filter(function(r){ return r.status === "NEW_LOW"; }).length,
     target: rows.filter(function(r){ return r.status === "TARGET_TODAY"; }).length
   };
-
   var filters = [
     { key:"all", lbl:"All", count: counts.all },
     { key:"buy", lbl:"✅ Buy Today", count: counts.buy },
@@ -697,7 +874,6 @@ function ScreenerView(props) {
     { key:"holding", lbl:"📈 Holding", count: counts.holding },
     { key:"target", lbl:"🎯 Target", count: counts.target }
   ];
-
   function exportScreener() {
     var data = [["Stock","Qty","Status","Detail","Latest Close",period+"D High",period+"D Low","GTT Price","Entry","Target","As of"]];
     rows.forEach(function(r){
@@ -714,7 +890,6 @@ function ScreenerView(props) {
     });
     downloadCSV("screener_" + dateStamp() + ".csv", data);
   }
-
   return (
     <div style={{padding:"0 16px 20px"}}>
       <div style={{display:"flex", gap:6, marginBottom:10, flexWrap:"wrap"}}>
@@ -774,10 +949,6 @@ function ScreenerView(props) {
           </table>
         </div>
       </div>}
-      <div style={{marginTop:12, fontSize:11, color:C.muted, lineHeight:1.7}}>
-        💡 <b>क्लिक</b> करके चार्ट देखें। <br/>
-        <b>Priority:</b> ✅ Buy Today → 🆕 New Low → 🔔 GTT → 📈 Holding → ⏳ Idle
-      </div>
     </div>
   );
 }
@@ -837,6 +1008,7 @@ function exportAllTrades(stocks) {
 function exportPortfolioSummary(stocks) {
   var stats = calcPortfolioStats(stocks);
   if (!stats) return;
+  var eq = calcEquityCurve(stocks);
   var rows = [
     ["=== PORTFOLIO SUMMARY ===", ""],
     ["Generated", new Date().toLocaleString("en-IN")],
@@ -850,9 +1022,11 @@ function exportPortfolioSummary(stocks) {
     ["Total Invested ₹", stats.totalInvestedRs.toFixed(0)],
     ["Total Returned ₹", stats.totalReturnedRs.toFixed(0)],
     ["Total Profit ₹", stats.totalProfitRs.toFixed(0)],
-    ["Holding Now", stats.openCount],
-    ["GTT Active", stats.gttCount],
-    ["Idle", stats.idleCount],
+    ["", ""],
+    ["=== EQUITY CURVE ==="],
+    ["Final Equity ₹", eq ? eq.finalEquity.toFixed(0) : ""],
+    ["Peak Equity ₹", eq ? eq.peakEquity.toFixed(0) : ""],
+    ["Max Drawdown ₹", eq ? eq.maxDrawdown.toFixed(0) : ""],
     ["", ""],
     ["=== PER STOCK ==="],
     ["Stock","Qty","Trades","Wins","Losses","Win%","Net%","Invested ₹","P&L ₹","Status"]
@@ -874,7 +1048,6 @@ function SettingsModal(props) {
   var [tp, setTp] = React.useState(String((props.targetPct * 100).toFixed(2)));
   var [ep, setEp] = React.useState(String(props.eps));
   var [err, setErr] = React.useState("");
-
   function save() {
     var p = parseInt(per, 10);
     var t = parseFloat(tp);
@@ -895,13 +1068,11 @@ function SettingsModal(props) {
       onClick={function(e){ if (e.currentTarget === e.target) { props.onClose(); } }}>
       <div style={{ background:"#0d1a2a", border:"1px solid " + C.border, borderRadius:14, padding:22, width:"100%", maxWidth:420, maxHeight:"90vh", overflowY:"auto" }}>
         <div style={{ fontWeight:700, fontSize:17, marginBottom:6, color:"#c4b5fd" }}>⚙️ Strategy Settings</div>
-        <div style={{ fontSize:11, color:C.muted, marginBottom:18, lineHeight:1.6 }}>
-          यहाँ बदलाव करने पर सारे लोडेड स्टॉक्स दोबारा calculate होंगे।
-        </div>
+        <div style={{ fontSize:11, color:C.muted, marginBottom:18, lineHeight:1.6 }}>यहाँ बदलाव करने पर सारे लोडेड स्टॉक्स दोबारा calculate होंगे।</div>
         <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>📅 Period (days)</label>
         <input type="number" min="3" max="500" value={per} onChange={function(e){ setPer(e.target.value); }}
           style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:14, boxSizing:"border-box", marginBottom:12, outline:"none" }} />
-        <div style={{ fontSize:10, color:C.muted, marginTop:-8, marginBottom:14 }}>Default: 20 (10, 15, 20, 50, 100)</div>
+        <div style={{ fontSize:10, color:C.muted, marginTop:-8, marginBottom:14 }}>Default: 20</div>
         <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>🎯 Target (%)</label>
         <input type="number" step="0.01" min="0.01" max="100" value={tp} onChange={function(e){ setTp(e.target.value); }}
           style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:14, boxSizing:"border-box", marginBottom:12, outline:"none" }} />
@@ -961,7 +1132,6 @@ function App() {
   function persistSettings(p, t, e) {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify({ period: p, targetPct: t, eps: e })); } catch(err) {}
   }
-
   function updateQty(idx, newQty) {
     setStocks(function(p){
       var copy = p.slice();
@@ -970,7 +1140,6 @@ function App() {
       return copy;
     });
   }
-
   function handleAdd(csvRaw, lbl) {
     setErr("");
     var parsed = parseCSV(csvRaw, period);
@@ -980,13 +1149,9 @@ function App() {
     var existing = null;
     for (var k = 0; k < stocks.length; k++) { if (stocks[k].name === name) { existing = stocks[k]; break; } }
     var newStock = {
-      name: name,
-      qty: existing ? (existing.qty || 1) : 1,
-      rawRows: parsed.rows,
-      rows: res.rows,
-      trades: res.trades,
-      openPosition: res.openPosition,
-      pendingGtt: res.pendingGtt
+      name: name, qty: existing ? (existing.qty || 1) : 1,
+      rawRows: parsed.rows, rows: res.rows,
+      trades: res.trades, openPosition: res.openPosition, pendingGtt: res.pendingGtt
     };
     setStocks(function(p){
       var idx = -1;
@@ -1002,11 +1167,8 @@ function App() {
     });
     return { ok: true, name: name };
   }
-
   function applySettings(newPeriod, newTargetPct, newEps) {
-    setPeriod(newPeriod);
-    setTargetPct(newTargetPct);
-    setEps(newEps);
+    setPeriod(newPeriod); setTargetPct(newTargetPct); setEps(newEps);
     persistSettings(newPeriod, newTargetPct, newEps);
     setStocks(function(prev){
       return prev.map(function(s){
@@ -1020,14 +1182,12 @@ function App() {
     });
     setSettingsOpen(false);
   }
-
   function submitAdd() {
     var fullName = label ? "NSE:" + label.replace(/^NSE:/i, "") : "";
     var res = handleAdd(csvTxt, fullName);
     if (res.error) { setErr(res.error); return; }
     setCsvTxt(""); setLabel(""); setModal(false);
   }
-
   function directLoad() {
     if (!label || !label.trim()) { setErr("पहले stock चुनें"); return; }
     setErr(""); setLoading(label + " का data ला रहे हैं...");
@@ -1037,7 +1197,6 @@ function App() {
       setCsvTxt(""); setLabel(""); setModal(false);
     }).catch(function(e){ setErr("❌ " + e.message); }).finally(function(){ setLoading(""); });
   }
-
   function loadFromSheet() {
     if (!sheetUrl || !sheetUrl.trim()) { setErr("पहले Sheet की URL paste करें"); return; }
     setErr(""); setLoading("Google Sheet से data ला रहे हैं...");
@@ -1047,7 +1206,6 @@ function App() {
       setCsvTxt(""); setLabel(""); setModal(false);
     }).catch(function(e){ setErr("❌ " + e.message); }).finally(function(){ setLoading(""); });
   }
-
   async function bulkLoad() {
     var symbols = bulkTxt.split(/[\n,\s]+/).map(function(s){ return s.trim().toUpperCase().replace(/^NSE:/, ""); }).filter(Boolean);
     var unique = [];
@@ -1070,12 +1228,10 @@ function App() {
     setBulkErrors(errs);
     setTimeout(function(){ setBulkProg({current:0,total:0,msg:""}); setBulkModal(false); setBulkTxt(""); }, 1500);
   }
-
   function removeStock(idx) {
     setStocks(function(p){ return p.filter(function(_,i){ return i !== idx; }); });
     setActive(function(a){ return Math.max(0, a >= idx ? a-1 : a); });
   }
-
   function onFile(e) {
     var f = e.target.files && e.target.files[0];
     if (!f) return;
@@ -1098,8 +1254,6 @@ function App() {
   ];
   var events = s ? s.rows.filter(function(r){ return r.events && r.events.length; }) : [];
   var isDefaultSettings = (period === DEFAULT_PERIOD && Math.abs(targetPct - DEFAULT_TARGET_PCT) < 1e-9 && Math.abs(eps - DEFAULT_EPS) < 1e-9);
-
-  // Current reference price for qty calc
   var refPrice = 0;
   if (s) {
     if (s.openPosition) refPrice = s.openPosition.entry;
@@ -1164,10 +1318,9 @@ function App() {
         <div style={card({ padding:"12px 18px", maxWidth:440, textAlign:"left" })}>
           <div style={{ fontSize:12, color:C.muted, lineHeight:1.9 }}>
             <b style={{color:C.text}}>Strategy (current):</b><br/>
-            1️⃣ <span style={{color:C.gtt}}>नया {period}D Low</span> → GTT @ {period}D High (रोज़ update)<br/>
+            1️⃣ <span style={{color:C.gtt}}>नया {period}D Low</span> → GTT @ {period}D High<br/>
             2️⃣ <span style={{color:C.buy}}>Price ≥ GTT</span> → BUY<br/>
-            3️⃣ <span style={{color:"#93c5fd"}}>Target = Buy × {(1+targetPct).toFixed(4)}</span><br/>
-            4️⃣ Target hit → Trade close → फिर IDLE
+            3️⃣ <span style={{color:"#93c5fd"}}>Target = Buy × {(1+targetPct).toFixed(4)}</span>
           </div>
         </div>
       </div>}
@@ -1205,9 +1358,9 @@ function App() {
               var tgt = q * s.openPosition.target;
               var pft = tgt - inv;
               return <div style={{ display:"flex", gap:16, fontSize:12, flexWrap:"wrap" }}>
-                <span style={{color:"#93c5fd"}}>Invested: <b>₹{inv.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
-                <span style={{color:C.gtt}}>Target Value: <b>₹{tgt.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
-                <span style={{color:C.buy}}>Potential Profit: <b>+₹{pft.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
+                <span style={{color:"#93c5fd"}}>Invested: <b>{fmtRs(inv)}</b></span>
+                <span style={{color:C.gtt}}>Target Value: <b>{fmtRs(tgt)}</b></span>
+                <span style={{color:C.buy}}>Potential Profit: <b>+{fmtRs(pft)}</b></span>
               </div>;
             })()}
           </div>}
@@ -1233,7 +1386,7 @@ function App() {
         {view === "trades" && <div style={{ padding:"0 16px 20px", display:"flex", flexDirection:"column", gap:8 }}>
           <div style={{display:"flex", gap:6, flexWrap:"wrap", alignItems:"center"}}>
             <ExportBtn label="📥 Export Trades CSV" onClick={function(){ exportTrades(s); }} />
-            <span style={{fontSize:11, color:C.muted}}>Qty: <b style={{color:C.text}}>{s.qty||1}</b> (ऊपर status card में बदलें)</span>
+            <span style={{fontSize:11, color:C.muted}}>Qty: <b style={{color:C.text}}>{s.qty||1}</b></span>
           </div>
           {s.trades.length === 0 && !s.openPosition && <div style={{ color:C.muted, textAlign:"center", padding:40 }}>कोई closed trade नहीं।</div>}
           {s.trades.map(function(t,i){
@@ -1247,11 +1400,11 @@ function App() {
                 <span style={{ background:"#052e16", color:C.buy, border:"1px solid #166534", borderRadius:20, padding:"2px 10px", fontSize:11, fontWeight:700 }}>🎯 +{t.pct.toFixed(2)}%</span>
               </div>
               <div style={{ display:"flex", gap:16, fontSize:12, color:"#94a3b8", flexWrap:"wrap", marginBottom:6 }}>
-                <span>Buy: <b style={{color:C.buy}}>₹{fmtN(t.entry)}</b> × <b>{q}</b> = <b style={{color:"#93c5fd"}}>₹{inv.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
-                <span>Exit: <b style={{color:C.gtt}}>₹{fmtN(t.exit)}</b> × <b>{q}</b> = <b style={{color:"#93c5fd"}}>₹{ret.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
+                <span>Buy: <b style={{color:C.buy}}>₹{fmtN(t.entry)}</b> × <b>{q}</b> = <b style={{color:"#93c5fd"}}>{fmtRs(inv)}</b></span>
+                <span>Exit: <b style={{color:C.gtt}}>₹{fmtN(t.exit)}</b> × <b>{q}</b> = <b style={{color:"#93c5fd"}}>{fmtRs(ret)}</b></span>
               </div>
               <div style={{ display:"flex", gap:16, fontSize:12, flexWrap:"wrap" }}>
-                <span style={{color:C.buy, fontWeight:700}}>Profit: +₹{pft.toLocaleString("en-IN", {maximumFractionDigits:0})}</span>
+                <span style={{color:C.buy, fontWeight:700}}>Profit: +{fmtRs(pft)}</span>
                 <span style={{color:C.muted}}>Held: <b>{t.days}</b> दिन</span>
               </div>
             </div>;
@@ -1267,11 +1420,11 @@ function App() {
                 <span style={{ background:"#1c1407", color:C.gtt, border:"1px solid #78350f", borderRadius:20, padding:"2px 10px", fontSize:11, fontWeight:700 }}>⏳ HOLDING</span>
               </div>
               <div style={{ display:"flex", gap:16, fontSize:12, color:"#94a3b8", flexWrap:"wrap", marginBottom:6 }}>
-                <span>Buy: <b style={{color:C.buy}}>₹{fmtN(s.openPosition.entry)}</b> × <b>{q}</b> = <b style={{color:"#93c5fd"}}>₹{inv.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
-                <span>Target: <b style={{color:C.gtt}}>₹{fmtN(s.openPosition.target)}</b> × <b>{q}</b> = <b style={{color:"#93c5fd"}}>₹{tgt.toLocaleString("en-IN", {maximumFractionDigits:0})}</b></span>
+                <span>Buy: <b style={{color:C.buy}}>₹{fmtN(s.openPosition.entry)}</b> × <b>{q}</b> = <b style={{color:"#93c5fd"}}>{fmtRs(inv)}</b></span>
+                <span>Target: <b style={{color:C.gtt}}>₹{fmtN(s.openPosition.target)}</b> × <b>{q}</b> = <b style={{color:"#93c5fd"}}>{fmtRs(tgt)}</b></span>
               </div>
               <div style={{ display:"flex", gap:16, fontSize:12, flexWrap:"wrap" }}>
-                <span style={{color:C.buy, fontWeight:700}}>Potential Profit: +₹{pft.toLocaleString("en-IN", {maximumFractionDigits:0})}</span>
+                <span style={{color:C.buy, fontWeight:700}}>Potential Profit: +{fmtRs(pft)}</span>
               </div>
             </div>;
           })()}
@@ -1383,11 +1536,9 @@ function App() {
         <div style={{ background:"#0d1a2a", borderTop:"1px solid " + C.border, borderRadius:"18px 18px 0 0", padding:20, width:"100%", maxHeight:"90vh", overflowY:"auto" }}>
           <div style={{ fontWeight:700, fontSize:16, marginBottom:6, color:"#c4b5fd" }}>⚡ Bulk Add (Yahoo से)</div>
           <div style={{ fontSize:11, color:C.muted, marginBottom:14, lineHeight:1.6 }}>
-            नीचे स्टॉक के symbols डालें — एक-एक लाइन पर या comma से अलग।<br/>
-            उदाहरण: <code style={{color:"#93c5fd"}}>RELIANCE, TCS, INFY</code>
+            नीचे स्टॉक के symbols डालें — एक-एक लाइन पर या comma से अलग।
           </div>
-          <textarea value={bulkTxt} onChange={function(e){ setBulkTxt(e.target.value); }}
-            rows={6}
+          <textarea value={bulkTxt} onChange={function(e){ setBulkTxt(e.target.value); }} rows={6}
             placeholder={"RELIANCE\nTCS\nINFY\nHDFCBANK\nICICIBANK"}
             disabled={!!bulkProg.total}
             style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:12, fontFamily:"monospace", resize:"vertical", boxSizing:"border-box", marginBottom:10, outline:"none", opacity: bulkProg.total ? 0.5 : 1 }} />
@@ -1415,14 +1566,8 @@ function App() {
         </div>
       </div>}
 
-      {settingsOpen && <SettingsModal
-        C={C}
-        period={period}
-        targetPct={targetPct}
-        eps={eps}
-        onClose={function(){ setSettingsOpen(false); }}
-        onSave={applySettings}
-      />}
+      {settingsOpen && <SettingsModal C={C} period={period} targetPct={targetPct} eps={eps}
+        onClose={function(){ setSettingsOpen(false); }} onSave={applySettings} />}
     </div>
   );
 }
