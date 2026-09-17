@@ -17,10 +17,11 @@
 <div id="root"></div>
 <script type="text/babel">
 const { useState } = React;
-const PERIOD = 20;
-const EPS = 0.03;
-const TARGET_PCT = 0.0628;
+const DEFAULT_PERIOD = 20;
+const DEFAULT_TARGET_PCT = 0.0628;
+const DEFAULT_EPS = 0.03;
 const SHEET_URL_KEY = "backtest_sheet_url";
+const SETTINGS_KEY = "backtest_settings_v1";
 
 function fmtD(d) {
   if (!d) return "—";
@@ -164,8 +165,9 @@ async function fetchFromSheet(url) {
   return { csv: text, name: "" };
 }
 
-function parseCSV(raw) {
+function parseCSV(raw, minPeriod) {
   if (!raw || !raw.trim()) return { error: "CSV खाली है।" };
+  minPeriod = minPeriod || DEFAULT_PERIOD;
   const lines = raw.trim().split("\n").map(function(l){ return l.trim(); }).filter(Boolean);
   let stockName = "", hIdx = -1;
   for (let i = 0; i < Math.min(lines.length, 12); i++) {
@@ -202,17 +204,20 @@ function parseCSV(raw) {
     rows.push({ date: d, open: open, high: high, low: low, close: close, vol: vol, ts: d.getTime() });
   }
   rows.sort(function(a,b){ return a.ts - b.ts; });
-  if (rows.length < PERIOD) return { error: "कम से कम " + PERIOD + " rows चाहिए। मिले: " + rows.length };
+  if (rows.length < minPeriod) return { error: "कम से कम " + minPeriod + " rows चाहिए। मिले: " + rows.length };
   return { stockName: stockName, rows: rows };
 }
 
-function calcSignals(rows) {
+function calcSignals(rows, period, targetPct, eps) {
+  period = period || DEFAULT_PERIOD;
+  targetPct = targetPct == null ? DEFAULT_TARGET_PCT : targetPct;
+  eps = eps == null ? DEFAULT_EPS : eps;
   const enriched = rows.map(function(r, i) {
-    if (i < PERIOD - 1) return Object.assign({}, r, { d20L: null, d20H: null, prevD20H: null, newLow: false, events: [], gttPrice: null });
-    const win = rows.slice(i - PERIOD + 1, i + 1);
+    if (i < period - 1) return Object.assign({}, r, { d20L: null, d20H: null, prevD20H: null, newLow: false, events: [], gttPrice: null });
+    const win = rows.slice(i - period + 1, i + 1);
     const d20L = Math.min.apply(null, win.map(function(x){ return x.low; }));
     const d20H = Math.max.apply(null, win.map(function(x){ return x.high; }));
-    return Object.assign({}, r, { d20L: d20L, d20H: d20H, prevD20H: null, newLow: r.low <= d20L + EPS, events: [], gttPrice: null });
+    return Object.assign({}, r, { d20L: d20L, d20H: d20H, prevD20H: null, newLow: r.low <= d20L + eps, events: [], gttPrice: null });
   });
   for (let i = 1; i < enriched.length; i++) {
     if (enriched[i-1].d20H != null) enriched[i].prevD20H = enriched[i-1].d20H;
@@ -225,23 +230,23 @@ function calcSignals(rows) {
     if (r.d20H == null) continue;
     if (state === "IN_POSITION") {
       r.position = { entry: entryPrice, entryDate: entryDate, target: targetPrice };
-      if (r.high >= targetPrice - EPS) {
+      if (r.high >= targetPrice - eps) {
         r.events.push("target");
-        trades.push({ entryDate: entryDate, entry: entryPrice, exitDate: r.date, exit: targetPrice, days: i - entryIdx, pct: TARGET_PCT * 100 });
+        trades.push({ entryDate: entryDate, entry: entryPrice, exitDate: r.date, exit: targetPrice, days: i - entryIdx, pct: targetPct * 100 });
         state = "IDLE"; entryPrice = null; entryDate = null; entryIdx = -1; targetPrice = null;
       }
       continue;
     }
     if (state === "GTT_ACTIVE") {
       const gttToday = r.prevD20H;
-      if (gttToday != null && r.high >= gttToday - EPS) {
+      if (gttToday != null && r.high >= gttToday - eps) {
         r.events.push("buy");
         r.gttPrice = gttToday;
         entryPrice = gttToday; entryDate = r.date; entryIdx = i;
-        targetPrice = entryPrice * (1 + TARGET_PCT);
-        if (r.high >= targetPrice - EPS) {
+        targetPrice = entryPrice * (1 + targetPct);
+        if (r.high >= targetPrice - eps) {
           r.events.push("target");
-          trades.push({ entryDate: entryDate, entry: entryPrice, exitDate: r.date, exit: targetPrice, days: 0, pct: TARGET_PCT * 100 });
+          trades.push({ entryDate: entryDate, entry: entryPrice, exitDate: r.date, exit: targetPrice, days: 0, pct: targetPct * 100 });
           state = "IDLE"; entryPrice = null; entryDate = null; entryIdx = -1; targetPrice = null;
         } else {
           state = "IN_POSITION";
@@ -316,16 +321,13 @@ function calcPortfolioStats(stocks) {
   };
 }
 
-// Screener: हर स्टॉक का आज (latest day) का status
 function calcScreenerRow(stock) {
   var rows = stock.rows;
   var last = rows[rows.length - 1];
-  var ev = last.events || [];
   var status = "IDLE";
   var label = "⏳ IDLE";
   var priority = 4;
   var detail = "";
-  var daysAgo = 0;
 
   if (stock.openPosition) {
     status = "HOLDING";
@@ -339,7 +341,6 @@ function calcScreenerRow(stock) {
     detail = "GTT @ ₹" + fmtN(stock.pendingGtt.price);
   }
 
-  // देखें पिछले कुछ दिनों में क्या event हुआ
   for (var i = rows.length - 1; i >= Math.max(0, rows.length - 10); i--) {
     var r = rows[i];
     var re = r.events || [];
@@ -369,13 +370,12 @@ function calcScreenerRow(stock) {
         status = "NEW_LOW";
         label = "🆕 New Low";
         priority = 1;
-        detail = "नया 20D Low → GTT लगा";
+        detail = "नया Low → GTT लगा";
       }
       break;
     }
   }
 
-  // अगर आज नया low बना और GTT active है
   if (last.newLow && !stock.openPosition && stock.pendingGtt) {
     status = "NEW_LOW";
     label = "🆕 New Low";
@@ -403,6 +403,7 @@ const NIFTY200 = [
 function MiniChart(props) {
   var rows = props.rows;
   var chartType = props.chartType || "candle";
+  var period = props.period || DEFAULT_PERIOD;
   var height = props.height || 320;
   var hov = React.useState(null); var hover = hov[0]; var setHover = hov[1];
   var W = 800, H = height, PAD = { l:50, r:10, t:20, b:30 };
@@ -473,8 +474,8 @@ function MiniChart(props) {
         <div style={{fontWeight:700,color:"#a0bde0"}}>{fmtD(hover.date)}</div>
         <div style={{color:"#94a3b8"}}>O: ₹{fmtN(hover.open)} &nbsp; H: ₹{fmtN(hover.high)}</div>
         <div style={{color:"#94a3b8"}}>L: ₹{fmtN(hover.low)} &nbsp; C: ₹{fmtN(hover.close)}</div>
-        <div style={{color:"#f87171"}}>20D High: ₹{fmtN(hover.d20H)}</div>
-        <div style={{color:"#34d399"}}>20D Low: ₹{fmtN(hover.d20L)}</div>
+        <div style={{color:"#f87171"}}>{period}D High: ₹{fmtN(hover.d20H)}</div>
+        <div style={{color:"#34d399"}}>{period}D Low: ₹{fmtN(hover.d20L)}</div>
         {hover.gttPrice && !(hover.events||[]).includes("buy") && <div style={{color:"#fbbf24",fontWeight:700}}>🔔 GTT Pending @ ₹{fmtN(hover.gttPrice)}</div>}
         {(hover.events||[]).includes("buy") && <div style={{color:"#4ade80",fontWeight:700}}>✅ BUY @ ₹{fmtN(hover.gttPrice)}</div>}
         {hover.position && !(hover.events||[]).includes("target") && <div style={{color:"#93c5fd"}}>🎯 Target @ ₹{fmtN(hover.position.target)}</div>}
@@ -483,8 +484,8 @@ function MiniChart(props) {
       <div style={{padding:"4px 14px",fontSize:11,color:"#64748b"}}>
         {chartType === "candle" && <><span style={{color:"#22c55e"}}>■ Up</span> &nbsp; <span style={{color:"#ef4444"}}>■ Down</span> &nbsp;</>}
         {chartType === "line" && <><span style={{color:"#60a5fa"}}>━ Close</span> &nbsp;</>}
-        <span style={{color:"#f87171"}}>┄ 20D High</span> &nbsp;
-        <span style={{color:"#34d399"}}>┄ 20D Low</span> &nbsp;
+        <span style={{color:"#f87171"}}>┄ {period}D High</span> &nbsp;
+        <span style={{color:"#34d399"}}>┄ {period}D Low</span> &nbsp;
         <span style={{color:"#4ade80"}}>● Buy</span> &nbsp;
         <span style={{color:"#fbbf24"}}>● Target</span>
       </div>
@@ -570,10 +571,10 @@ function PortfolioView(props) {
   );
 }
 
-// ---------- SCREENER ----------
 function ScreenerView(props) {
   var stocks = props.stocks;
   var onSelect = props.onSelect;
+  var period = props.period || DEFAULT_PERIOD;
   var [filter, setFilter] = React.useState("all");
   var C = { card:"#0f1e33", border:"#1e3352", muted:"#64748b", buy:"#4ade80", high:"#f87171", gtt:"#fbbf24", dim:"#4a6fa5", text:"#dce8f8", accent:"#2563eb" };
   var card = function(sx){ return Object.assign({ background:C.card, border:"1px solid " + C.border, borderRadius:10 }, sx || {}); };
@@ -622,7 +623,7 @@ function ScreenerView(props) {
   ];
 
   function exportScreener() {
-    var data = [["Stock","Status","Detail","Latest Close","20D High","20D Low","GTT Price","Entry","Target","As of"]];
+    var data = [["Stock","Status","Detail","Latest Close",period+"D High",period+"D Low","GTT Price","Entry","Target","As of"]];
     rows.forEach(function(r){
       data.push([
         r.name, r.status, r.detail,
@@ -668,7 +669,7 @@ function ScreenerView(props) {
           <table style={{width:"100%", borderCollapse:"collapse", fontSize:11, minWidth:600}}>
             <thead>
               <tr style={{background:"#0a1626"}}>
-                {["Stock","Status","Detail","Close","20D High","20D Low","GTT","Target"].map(function(h){
+                {["Stock","Status","Detail","Close",period+"D High",period+"D Low","GTT","Target"].map(function(h){
                   return <th key={h} style={{padding:"8px", textAlign:"left", color:C.muted, fontWeight:600, borderBottom:"1px solid " + C.border, whiteSpace:"nowrap", fontSize:10}}>{h}</th>;
                 })}
               </tr>
@@ -681,12 +682,10 @@ function ScreenerView(props) {
                 else if (r.status === "NEW_LOW") bg = "rgba(96,165,250,0.08)";
                 else if (r.status === "GTT") bg = "rgba(251,191,36,0.05)";
                 else if (r.status === "HOLDING") bg = "rgba(74,222,128,0.05)";
-
                 var statusColor = C.muted;
                 if (r.status === "BUY_TODAY" || r.status === "HOLDING") statusColor = C.buy;
                 else if (r.status === "GTT" || r.status === "TARGET_TODAY") statusColor = C.gtt;
                 else if (r.status === "NEW_LOW") statusColor = "#60a5fa";
-
                 return <tr key={i} style={{background:bg, borderBottom:"1px solid #0d1a2a", cursor:"pointer"}}
                   onClick={function(){ onSelect(r.idx); }}>
                   <td style={{padding:"8px", color:"#93c5fd", fontWeight:600, whiteSpace:"nowrap"}}>{r.name}</td>
@@ -703,10 +702,159 @@ function ScreenerView(props) {
           </table>
         </div>
       </div>}
-
       <div style={{marginTop:12, fontSize:11, color:C.muted, lineHeight:1.7}}>
         💡 <b>क्लिक</b> करके चार्ट देखें। <br/>
         <b>Priority:</b> ✅ Buy Today → 🆕 New Low → 🔔 GTT → 📈 Holding → ⏳ Idle
+      </div>
+    </div>
+  );
+}
+
+// ---------- EXPORT FUNCTIONS ----------
+function exportTrades(stock) {
+  if (!stock) return;
+  var rows = [["Stock","Entry Date","Entry Price","Exit Date","Exit Price","Days Held","Pct Gain"]];
+  stock.trades.forEach(function(t){
+    rows.push([stock.name, fmtD(t.entryDate), t.entry.toFixed(2), fmtD(t.exitDate), t.exit.toFixed(2), t.days, t.pct.toFixed(2)]);
+  });
+  downloadCSV("trades_" + stock.name.replace(/[^a-z0-9]/gi,"_") + "_" + dateStamp() + ".csv", rows);
+}
+function exportTable(stock) {
+  if (!stock) return;
+  var rows = [["Date","Open","High","Low","Close","Volume","20D Low","20D High","GTT Price","Event","Status"]];
+  stock.rows.forEach(function(r){
+    var ev = (r.events||[]).join(" | ");
+    var st = r.position ? "HOLDING" : (r.gttPrice ? "GTT" : "");
+    rows.push([
+      fmtD(r.date),
+      r.open != null ? r.open.toFixed(2) : "",
+      r.high != null ? r.high.toFixed(2) : "",
+      r.low != null ? r.low.toFixed(2) : "",
+      r.close != null ? r.close.toFixed(2) : "",
+      r.vol || 0,
+      r.d20L != null ? r.d20L.toFixed(2) : "",
+      r.d20H != null ? r.d20H.toFixed(2) : "",
+      r.gttPrice != null ? r.gttPrice.toFixed(2) : "",
+      ev, st
+    ]);
+  });
+  downloadCSV("signals_" + stock.name.replace(/[^a-z0-9]/gi,"_") + "_" + dateStamp() + ".csv", rows);
+}
+function exportAllTrades(stocks) {
+  var rows = [["Stock","Entry Date","Entry Price","Exit Date","Exit Price","Days Held","Pct Gain"]];
+  stocks.forEach(function(s){
+    (s.trades || []).forEach(function(t){
+      rows.push([s.name, fmtD(t.entryDate), t.entry.toFixed(2), fmtD(t.exitDate), t.exit.toFixed(2), t.days, t.pct.toFixed(2)]);
+    });
+  });
+  downloadCSV("all_trades_" + dateStamp() + ".csv", rows);
+}
+function exportPortfolioSummary(stocks) {
+  var stats = calcPortfolioStats(stocks);
+  if (!stats) return;
+  var rows = [
+    ["=== PORTFOLIO SUMMARY ===", ""],
+    ["Generated", new Date().toLocaleString("en-IN")],
+    ["", ""],
+    ["Total Stocks", stats.totalStocks],
+    ["Total Trades", stats.totalTrades],
+    ["Wins", stats.wins],
+    ["Losses", stats.losses],
+    ["Win Rate %", stats.winRate.toFixed(2)],
+    ["Gross Profit %", stats.grossWin.toFixed(2)],
+    ["Gross Loss %", stats.grossLoss.toFixed(2)],
+    ["Net Return %", stats.netPct.toFixed(2)],
+    ["Profit Factor", isFinite(stats.profitFactor) ? stats.profitFactor.toFixed(2) : "Inf"],
+    ["Expectancy %", stats.expectancy.toFixed(2)],
+    ["Avg Win %", stats.avgWin.toFixed(2)],
+    ["Avg Loss %", stats.avgLoss.toFixed(2)],
+    ["Avg Hold Days", stats.avgHeldDays.toFixed(2)],
+    ["Holding Now", stats.openCount],
+    ["GTT Active", stats.gttCount],
+    ["Idle", stats.idleCount],
+    ["", ""],
+    ["=== PER STOCK ==="],
+    ["Stock","Trades","Wins","Losses","Win%","Avg Win%","Avg Loss%","Net%","Status","Last Close"]
+  ];
+  stats.perStock.forEach(function(p){
+    rows.push([
+      p.name, p.trades, p.wins, p.losses,
+      p.winRate.toFixed(2), p.avgWin.toFixed(2), p.avgLoss.toFixed(2),
+      p.netPct.toFixed(2), p.status,
+      p.lastClose != null ? p.lastClose.toFixed(2) : ""
+    ]);
+  });
+  downloadCSV("portfolio_summary_" + dateStamp() + ".csv", rows);
+}
+
+// ---------- SETTINGS MODAL ----------
+function SettingsModal(props) {
+  var C = props.C;
+  var [per, setPer] = React.useState(String(props.period));
+  var [tp, setTp] = React.useState(String((props.targetPct * 100).toFixed(2)));
+  var [ep, setEp] = React.useState(String(props.eps));
+  var [err, setErr] = React.useState("");
+
+  function save() {
+    var p = parseInt(per, 10);
+    var t = parseFloat(tp);
+    var e = parseFloat(ep);
+    if (!p || p < 3 || p > 500) { setErr("Period 3 से 500 के बीच होना चाहिए।"); return; }
+    if (!t || t <= 0 || t > 100) { setErr("Target % 0 से 100 के बीच होना चाहिए।"); return; }
+    if (isNaN(e) || e < 0 || e > 10) { setErr("EPS 0 से 10 के बीच होना चाहिए।"); return; }
+    props.onSave(p, t / 100, e);
+  }
+  function reset() {
+    setPer(String(DEFAULT_PERIOD));
+    setTp(String((DEFAULT_TARGET_PCT * 100).toFixed(2)));
+    setEp(String(DEFAULT_EPS));
+    setErr("");
+  }
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.85)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:110, padding:16 }}
+      onClick={function(e){ if (e.currentTarget === e.target) { props.onClose(); } }}>
+      <div style={{ background:"#0d1a2a", border:"1px solid " + C.border, borderRadius:14, padding:22, width:"100%", maxWidth:420, maxHeight:"90vh", overflowY:"auto" }}>
+        <div style={{ fontWeight:700, fontSize:17, marginBottom:6, color:"#c4b5fd" }}>⚙️ Strategy Settings</div>
+        <div style={{ fontSize:11, color:C.muted, marginBottom:18, lineHeight:1.6 }}>
+          यहाँ बदलाव करने पर सारे लोडेड स्टॉक्स दोबारा calculate होंगे (same data, नए parameters)।
+        </div>
+
+        <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>📅 Period (days)</label>
+        <input type="number" min="3" max="500" value={per} onChange={function(e){ setPer(e.target.value); }}
+          style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:14, boxSizing:"border-box", marginBottom:12, outline:"none" }} />
+        <div style={{ fontSize:10, color:C.muted, marginTop:-8, marginBottom:14 }}>
+          Default: 20 (उदाहरण: 10, 15, 20, 50, 100)
+        </div>
+
+        <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>🎯 Target (%)</label>
+        <input type="number" step="0.01" min="0.01" max="100" value={tp} onChange={function(e){ setTp(e.target.value); }}
+          style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:14, boxSizing:"border-box", marginBottom:12, outline:"none" }} />
+        <div style={{ fontSize:10, color:C.muted, marginTop:-8, marginBottom:14 }}>
+          Default: 6.28 (उदाहरण: 3, 5, 6.28, 10)
+        </div>
+
+        <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>📏 EPS Tolerance</label>
+        <input type="number" step="0.01" min="0" max="10" value={ep} onChange={function(e){ setEp(e.target.value); }}
+          style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:14, boxSizing:"border-box", marginBottom:12, outline:"none" }} />
+        <div style={{ fontSize:10, color:C.muted, marginTop:-8, marginBottom:14 }}>
+          Default: 0.03 (price match के लिए छोटा tolerance)
+        </div>
+
+        {err && <div style={{ color:"#f87171", background:"rgba(239,68,68,.1)", border:"1px solid rgba(239,68,68,.3)", borderRadius:8, padding:"8px 12px", fontSize:12, marginBottom:12 }}>{err}</div>}
+
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+          <button onClick={props.onClose}
+            style={{ flex:1, background:C.border, color:C.text, border:"none", borderRadius:10, padding:12, fontSize:13, cursor:"pointer", minWidth:80 }}>Cancel</button>
+          <button onClick={reset}
+            style={{ flex:1, background:"#78350f", color:"#fde68a", border:"none", borderRadius:10, padding:12, fontSize:13, fontWeight:700, cursor:"pointer", minWidth:80 }}>↺ Reset</button>
+          <button onClick={save}
+            style={{ flex:2, background:"#7c3aed", color:"#fff", border:"none", borderRadius:10, padding:12, fontSize:14, fontWeight:700, cursor:"pointer", minWidth:100 }}>💾 Save & Recalculate</button>
+        </div>
+
+        <div style={{ marginTop:14, fontSize:10, color:C.muted, lineHeight:1.7, padding:"8px 10px", background:"#0a1626", borderRadius:8 }}>
+          <b style={{color:"#c4b5fd"}}>Current:</b> Period={props.period}d · Target={(props.targetPct*100).toFixed(2)}% · EPS={props.eps}<br/>
+          <b style={{color:"#c4b5fd"}}>Defaults:</b> {DEFAULT_PERIOD}d · {(DEFAULT_TARGET_PCT*100).toFixed(2)}% · {DEFAULT_EPS}
+        </div>
       </div>
     </div>
   );
@@ -729,18 +877,46 @@ function App() {
   var bprog = React.useState({current:0, total:0, msg:""}); var bulkProg = bprog[0]; var setBulkProg = bprog[1];
   var berr = React.useState([]); var bulkErrors = berr[0]; var setBulkErrors = berr[1];
 
+  // Settings — load from localStorage
+  var initSettings = (function(){
+    try {
+      var raw = localStorage.getItem(SETTINGS_KEY);
+      if (raw) {
+        var s = JSON.parse(raw);
+        if (s && s.period > 0 && s.targetPct > 0 && s.eps >= 0) return s;
+      }
+    } catch(e) {}
+    return { period: DEFAULT_PERIOD, targetPct: DEFAULT_TARGET_PCT, eps: DEFAULT_EPS };
+  })();
+
+  var perSt = React.useState(initSettings.period); var period = perSt[0]; var setPeriod = perSt[1];
+  var tpSt = React.useState(initSettings.targetPct); var targetPct = tpSt[0]; var setTargetPct = tpSt[1];
+  var epSt = React.useState(initSettings.eps); var eps = epSt[0]; var setEps = epSt[1];
+  var setModalOpen = React.useState(false); var settingsOpen = setModalOpen[0]; var setSettingsOpen = setModalOpen[1];
+
   function saveSheetUrl(u) {
     setSheetUrl(u);
     try { localStorage.setItem(SHEET_URL_KEY, u); } catch(e) {}
   }
 
+  function persistSettings(p, t, e) {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify({ period: p, targetPct: t, eps: e })); } catch(err) {}
+  }
+
   function handleAdd(csvRaw, lbl) {
     setErr("");
-    var parsed = parseCSV(csvRaw);
+    var parsed = parseCSV(csvRaw, period);
     if (parsed.error) { return { error: parsed.error }; }
-    var res = calcSignals(parsed.rows);
+    var res = calcSignals(parsed.rows, period, targetPct, eps);
     var name = (lbl && lbl.trim()) || parsed.stockName || ("Stock " + (stocks.length + 1));
-    var newStock = { name: name, rows: res.rows, trades: res.trades, openPosition: res.openPosition, pendingGtt: res.pendingGtt };
+    var newStock = {
+      name: name,
+      rawRows: parsed.rows,
+      rows: res.rows,
+      trades: res.trades,
+      openPosition: res.openPosition,
+      pendingGtt: res.pendingGtt
+    };
     setStocks(function(p){
       var idx = -1;
       for (var k = 0; k < p.length; k++) { if (p[k].name === name) { idx = k; break; } }
@@ -754,6 +930,27 @@ function App() {
       return p.concat([newStock]);
     });
     return { ok: true, name: name };
+  }
+
+  function applySettings(newPeriod, newTargetPct, newEps) {
+    setPeriod(newPeriod);
+    setTargetPct(newTargetPct);
+    setEps(newEps);
+    persistSettings(newPeriod, newTargetPct, newEps);
+    // Recalculate all stocks using their rawRows
+    setStocks(function(prev){
+      return prev.map(function(s){
+        if (!s.rawRows || s.rawRows.length < newPeriod) return s;
+        var res = calcSignals(s.rawRows, newPeriod, newTargetPct, newEps);
+        return Object.assign({}, s, {
+          rows: res.rows,
+          trades: res.trades,
+          openPosition: res.openPosition,
+          pendingGtt: res.pendingGtt
+        });
+      });
+    });
+    setSettingsOpen(false);
   }
 
   function submitAdd() {
@@ -801,7 +998,6 @@ function App() {
       } catch (e) {
         errs.push(sym + ": " + e.message);
       }
-      // हर fetch के बीच थोड़ा delay (rate limit से बचने के लिए)
       await new Promise(function(resolve){ setTimeout(resolve, 400); });
     }
     setBulkProg({current: unique.length, total: unique.length, msg: "पूरा हुआ ✅"});
@@ -836,13 +1032,20 @@ function App() {
   ];
   var events = s ? s.rows.filter(function(r){ return r.events && r.events.length; }) : [];
 
+  var isDefaultSettings = (period === DEFAULT_PERIOD && Math.abs(targetPct - DEFAULT_TARGET_PCT) < 1e-9 && Math.abs(eps - DEFAULT_EPS) < 1e-9);
+
   return (
     <div style={{ fontFamily:"'Inter',system-ui,sans-serif", background:C.bg, color:C.text, minHeight:"100vh", fontSize:14 }}>
-      <div style={{ background:C.card, padding:"12px 16px", display:"flex", alignItems:"center", gap:10, borderBottom:"1px solid " + C.border }}>
-        <div style={{ flex:1 }}>
-          <span style={{ fontWeight:700, fontSize:16 }}>📈 20-Day Breakout + GTT</span>
-          <span style={{ fontSize:11, color:C.muted, marginLeft:10 }}>6.28% Target</span>
+      <div style={{ background:C.card, padding:"12px 16px", display:"flex", alignItems:"center", gap:10, borderBottom:"1px solid " + C.border, flexWrap:"wrap" }}>
+        <div style={{ flex:1, minWidth:200 }}>
+          <span style={{ fontWeight:700, fontSize:16 }}>📈 {period}-Day Breakout + GTT</span>
+          <span style={{ fontSize:11, color:C.muted, marginLeft:10 }}>{(targetPct*100).toFixed(2)}% Target</span>
+          {!isDefaultSettings && <span style={{ fontSize:10, color:"#c4b5fd", marginLeft:8, background:"#2e1065", border:"1px solid #7c3aed", borderRadius:10, padding:"2px 8px", fontWeight:700 }}>CUSTOM</span>}
         </div>
+        <button onClick={function(){ setSettingsOpen(true); }}
+          style={{ background: isDefaultSettings ? "#334155" : "#7c3aed", color:"#fff", border:"none", borderRadius:8, padding:"7px 12px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+          ⚙️ Settings
+        </button>
         <button onClick={function(){ setBulkModal(true); }}
           style={{ background:"#7c3aed", color:"#fff", border:"none", borderRadius:8, padding:"7px 12px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
           ⚡ Bulk
@@ -875,6 +1078,10 @@ function App() {
             style={{ background:"#7c3aed", color:"#fff", border:"none", borderRadius:10, padding:"11px 22px", fontSize:14, fontWeight:600, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
             ⚡ Bulk Add
           </button>
+          <button onClick={function(){ setSettingsOpen(true); }}
+            style={{ background:"#334155", color:"#fff", border:"none", borderRadius:10, padding:"11px 22px", fontSize:14, fontWeight:600, cursor:"pointer" }}>
+            ⚙️ Settings
+          </button>
           {sheetUrl && <button onClick={loadFromSheet} disabled={!!loading}
             style={{ background:"#16a34a", color:"#fff", border:"none", borderRadius:10, padding:"11px 22px", fontSize:14, fontWeight:600, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
             {loading ? "⏳ Load हो रहा है..." : "🔄 Sheet से Load"}
@@ -883,10 +1090,10 @@ function App() {
         {err && <div style={{ color:"#f87171", fontSize:12, maxWidth:400 }}>{err}</div>}
         <div style={card({ padding:"12px 18px", maxWidth:440, textAlign:"left" })}>
           <div style={{ fontSize:12, color:C.muted, lineHeight:1.9 }}>
-            <b style={{color:C.text}}>Strategy:</b><br/>
-            1️⃣ <span style={{color:C.gtt}}>नया 20D Low</span> → GTT @ 20D High (रोज़ update)<br/>
+            <b style={{color:C.text}}>Strategy (current):</b><br/>
+            1️⃣ <span style={{color:C.gtt}}>नया {period}D Low</span> → GTT @ {period}D High (रोज़ update)<br/>
             2️⃣ <span style={{color:C.buy}}>Price ≥ GTT</span> → BUY<br/>
-            3️⃣ <span style={{color:"#93c5fd"}}>Target = Buy × 1.0628</span><br/>
+            3️⃣ <span style={{color:"#93c5fd"}}>Target = Buy × {(1+targetPct).toFixed(4)}</span><br/>
             4️⃣ Target hit → Trade close → फिर IDLE
           </div>
         </div>
@@ -898,8 +1105,8 @@ function App() {
             { lbl:"Closed Trades", val: s.trades.length, clr: C.buy },
             { lbl:"Open Position", val: s.openPosition ? "1" : "0", clr: s.openPosition ? C.gtt : C.muted },
             { lbl:"Latest Close", val: "₹" + fmtN(last ? last.close : null), clr:"#93c5fd" },
-            { lbl:"20D High", val: "₹" + fmtN(last ? last.d20H : null), clr: C.high },
-            { lbl:"20D Low", val: "₹" + fmtN(last ? last.d20L : null), clr: C.low }
+            { lbl:period+"D High", val: "₹" + fmtN(last ? last.d20H : null), clr: C.high },
+            { lbl:period+"D Low", val: "₹" + fmtN(last ? last.d20L : null), clr: C.low }
           ].map(function(c,i){
             return <div key={i} style={card({ padding:"10px 16px", minWidth:90, textAlign:"center", flexShrink:0 })}>
               <div style={{ fontSize:17, fontWeight:700, color:c.clr, fontFamily:"monospace" }}>{c.val}</div>
@@ -922,13 +1129,13 @@ function App() {
         {view === "chart" && <div style={{ padding:"0 10px 20px" }}>
           <div style={card({ padding:"10px 0" })}>
             <div style={{ paddingLeft:14, paddingRight:14, fontSize:12, color:C.muted, marginBottom:6, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
-              <span style={{flex:1}}>{s.name} — {chartType === "candle" ? "Candlestick" : "Line"} + 20D Bands</span>
+              <span style={{flex:1}}>{s.name} — {chartType === "candle" ? "Candlestick" : "Line"} + {period}D Bands</span>
               <div style={{display:"flex", gap:4}}>
                 <button onClick={function(){ setChartType("candle"); }} style={{ background: chartType==="candle" ? C.accent : "none", color: chartType==="candle" ? "#fff" : C.muted, border: "1px solid " + (chartType==="candle" ? C.accent : C.border), borderRadius:6, padding:"4px 10px", fontSize:11, cursor:"pointer", fontWeight: chartType==="candle" ? 700 : 400 }}>🕯 Candle</button>
                 <button onClick={function(){ setChartType("line"); }} style={{ background: chartType==="line" ? C.accent : "none", color: chartType==="line" ? "#fff" : C.muted, border: "1px solid " + (chartType==="line" ? C.accent : C.border), borderRadius:6, padding:"4px 10px", fontSize:11, cursor:"pointer", fontWeight: chartType==="line" ? 700 : 400 }}>📈 Line</button>
               </div>
             </div>
-            <MiniChart rows={s.rows} chartType={chartType} />
+            <MiniChart rows={s.rows} chartType={chartType} period={period} />
           </div>
         </div>}
         {view === "trades" && <div style={{ padding:"0 16px 20px", display:"flex", flexDirection:"column", gap:8 }}>
@@ -990,7 +1197,7 @@ function App() {
             <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11 }}>
               <thead>
                 <tr style={{ background:C.card }}>
-                  {["Date","Close","20D Low","20D High","GTT Price","Event"].map(function(h){
+                  {["Date","Close",period+"D Low",period+"D High","GTT Price","Event"].map(function(h){
                     return <th key={h} style={{ padding:"8px", textAlign:["Date","Event"].indexOf(h)>=0?"left":"right", color:C.muted, fontWeight:600, borderBottom:"1px solid " + C.border, whiteSpace:"nowrap", fontSize:10 }}>{h}</th>;
                   })}
                 </tr>
@@ -1018,7 +1225,7 @@ function App() {
             </table>
           </div>
         </div>}
-        {view === "screener" && <ScreenerView stocks={stocks} onSelect={function(i){ setActive(i); setView("chart"); }} />}
+        {view === "screener" && <ScreenerView stocks={stocks} period={period} onSelect={function(i){ setActive(i); setView("chart"); }} />}
         {view === "portfolio" && <PortfolioView stocks={stocks} onSelect={function(i){ setActive(i); setView("chart"); }} />}
       </div>}
       {modal && <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.8)", display:"flex", alignItems:"flex-end", zIndex:100 }}
@@ -1100,6 +1307,15 @@ function App() {
           </div>
         </div>
       </div>}
+
+      {settingsOpen && <SettingsModal
+        C={C}
+        period={period}
+        targetPct={targetPct}
+        eps={eps}
+        onClose={function(){ setSettingsOpen(false); }}
+        onSave={applySettings}
+      />}
     </div>
   );
 }
