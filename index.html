@@ -30,6 +30,30 @@ function fmtN(v, dec) {
   if (v == null || isNaN(v)) return "—";
   return Number(v).toFixed(dec == null ? 2 : dec);
 }
+function csvEsc(v) {
+  if (v == null) return "";
+  var s = String(v);
+  if (s.indexOf(",") >= 0 || s.indexOf('"') >= 0 || s.indexOf("\n") >= 0) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+function downloadCSV(filename, rows) {
+  var csv = rows.map(function(r){ return r.map(csvEsc).join(","); }).join("\n");
+  var blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 500);
+}
+function dateStamp() {
+  var d = new Date();
+  return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+}
 
 function parseDateCell(s) {
   if (s == null) return null;
@@ -292,6 +316,99 @@ function calcPortfolioStats(stocks) {
   };
 }
 
+// ---------- EXPORT FUNCTIONS ----------
+function exportTrades(stock) {
+  if (!stock) return;
+  var rows = [["Stock","Entry Date","Entry Price","Exit Date","Exit Price","Days Held","Pct Gain"]];
+  stock.trades.forEach(function(t){
+    rows.push([
+      stock.name,
+      fmtD(t.entryDate),
+      t.entry.toFixed(2),
+      fmtD(t.exitDate),
+      t.exit.toFixed(2),
+      t.days,
+      t.pct.toFixed(2)
+    ]);
+  });
+  downloadCSV("trades_" + stock.name.replace(/[^a-z0-9]/gi,"_") + "_" + dateStamp() + ".csv", rows);
+}
+function exportTable(stock) {
+  if (!stock) return;
+  var rows = [["Date","Open","High","Low","Close","Volume","20D Low","20D High","GTT Price","Event","Status"]];
+  stock.rows.forEach(function(r){
+    var ev = (r.events||[]).join(" | ");
+    var st = r.position ? "HOLDING" : (r.gttPrice ? "GTT" : "");
+    rows.push([
+      fmtD(r.date),
+      r.open != null ? r.open.toFixed(2) : "",
+      r.high != null ? r.high.toFixed(2) : "",
+      r.low != null ? r.low.toFixed(2) : "",
+      r.close != null ? r.close.toFixed(2) : "",
+      r.vol || 0,
+      r.d20L != null ? r.d20L.toFixed(2) : "",
+      r.d20H != null ? r.d20H.toFixed(2) : "",
+      r.gttPrice != null ? r.gttPrice.toFixed(2) : "",
+      ev, st
+    ]);
+  });
+  downloadCSV("signals_" + stock.name.replace(/[^a-z0-9]/gi,"_") + "_" + dateStamp() + ".csv", rows);
+}
+function exportAllTrades(stocks) {
+  var rows = [["Stock","Entry Date","Entry Price","Exit Date","Exit Price","Days Held","Pct Gain"]];
+  stocks.forEach(function(s){
+    (s.trades || []).forEach(function(t){
+      rows.push([
+        s.name,
+        fmtD(t.entryDate),
+        t.entry.toFixed(2),
+        fmtD(t.exitDate),
+        t.exit.toFixed(2),
+        t.days,
+        t.pct.toFixed(2)
+      ]);
+    });
+  });
+  downloadCSV("all_trades_" + dateStamp() + ".csv", rows);
+}
+function exportPortfolioSummary(stocks) {
+  var stats = calcPortfolioStats(stocks);
+  if (!stats) return;
+  var rows = [
+    ["=== PORTFOLIO SUMMARY ===", ""],
+    ["Generated", new Date().toLocaleString("en-IN")],
+    ["", ""],
+    ["Total Stocks", stats.totalStocks],
+    ["Total Trades", stats.totalTrades],
+    ["Wins", stats.wins],
+    ["Losses", stats.losses],
+    ["Win Rate %", stats.winRate.toFixed(2)],
+    ["Gross Profit %", stats.grossWin.toFixed(2)],
+    ["Gross Loss %", stats.grossLoss.toFixed(2)],
+    ["Net Return %", stats.netPct.toFixed(2)],
+    ["Profit Factor", isFinite(stats.profitFactor) ? stats.profitFactor.toFixed(2) : "Inf"],
+    ["Expectancy %", stats.expectancy.toFixed(2)],
+    ["Avg Win %", stats.avgWin.toFixed(2)],
+    ["Avg Loss %", stats.avgLoss.toFixed(2)],
+    ["Avg Hold Days", stats.avgHeldDays.toFixed(2)],
+    ["Holding Now", stats.openCount],
+    ["GTT Active", stats.gttCount],
+    ["Idle", stats.idleCount],
+    ["", ""],
+    ["=== PER STOCK ==="],
+    ["Stock","Trades","Wins","Losses","Win%","Avg Win%","Avg Loss%","Net%","Status","Last Close"]
+  ];
+  stats.perStock.forEach(function(p){
+    rows.push([
+      p.name, p.trades, p.wins, p.losses,
+      p.winRate.toFixed(2), p.avgWin.toFixed(2), p.avgLoss.toFixed(2),
+      p.netPct.toFixed(2), p.status,
+      p.lastClose != null ? p.lastClose.toFixed(2) : ""
+    ]);
+  });
+  downloadCSV("portfolio_summary_" + dateStamp() + ".csv", rows);
+}
+
 const NIFTY200 = [
   {sym:"ABB",name:"ABB India"},{sym:"ABCAPITAL",name:"Aditya Birla Capital"},{sym:"ABFRL",name:"Aditya Birla Fashion"},{sym:"ADANIENT",name:"Adani Enterprises"},{sym:"ADANIENSOL",name:"Adani Energy Solutions"},{sym:"ADANIGREEN",name:"Adani Green Energy"},{sym:"ADANIPORTS",name:"Adani Ports"},{sym:"ADANIPOWER",name:"Adani Power"},{sym:"ALKEM",name:"Alkem Labs"},{sym:"AMBUJACEM",name:"Ambuja Cements"},{sym:"APOLLOHOSP",name:"Apollo Hospitals"},{sym:"APOLLOTYRE",name:"Apollo Tyres"},{sym:"ASHOKLEY",name:"Ashok Leyland"},{sym:"ASIANPAINT",name:"Asian Paints"},{sym:"ASTRAL",name:"Astral"},{sym:"ATUL",name:"Atul"},{sym:"ATGL",name:"Adani Total Gas"},{sym:"AUROPHARMA",name:"Aurobindo Pharma"},{sym:"AWL",name:"Adani Wilmar"},{sym:"AXISBANK",name:"Axis Bank"},{sym:"BAJAJ-AUTO",name:"Bajaj Auto"},{sym:"BAJAJFINSV",name:"Bajaj Finserv"},{sym:"BAJAJHLDNG",name:"Bajaj Holdings"},{sym:"BAJFINANCE",name:"Bajaj Finance"},{sym:"BALKRISIND",name:"Balkrishna Industries"},{sym:"BANDHANBNK",name:"Bandhan Bank"},{sym:"BANKBARODA",name:"Bank of Baroda"},{sym:"BEL",name:"Bharat Electronics"},{sym:"BERGEPAINT",name:"Berger Paints"},{sym:"BHARTIARTL",name:"Bharti Airtel"},{sym:"BHEL",name:"BHEL"},{sym:"BIOCON",name:"Biocon"},{sym:"BOSCHLTD",name:"Bosch"},{sym:"BPCL",name:"BPCL"},{sym:"BRITANNIA",name:"Britannia"},{sym:"BSE",name:"BSE"},{sym:"CANBK",name:"Canara Bank"},{sym:"CDSL",name:"CDSL"},{sym:"CESC",name:"CESC"},{sym:"CGPOWER",name:"CG Power"},{sym:"CHOLAFIN",name:"Cholamandalam"},{sym:"CIPLA",name:"Cipla"},{sym:"COALINDIA",name:"Coal India"},{sym:"COFORGE",name:"Coforge"},{sym:"COLPAL",name:"Colgate"},{sym:"CONCOR",name:"Container Corp"},{sym:"CUMMINSIND",name:"Cummins India"},{sym:"DABUR",name:"Dabur"},{sym:"DEEPAKNTR",name:"Deepak Nitrite"},{sym:"DELHIVERY",name:"Delhivery"},{sym:"DIVISLAB",name:"Divi's Labs"},{sym:"DIXON",name:"Dixon Tech"},{sym:"DLF",name:"DLF"},{sym:"DRREDDY",name:"Dr Reddy's"},{sym:"EICHERMOT",name:"Eicher Motors"},{sym:"FACT",name:"FACT"},{sym:"FEDERALBNK",name:"Federal Bank"},{sym:"FLUOROCHEM",name:"Gujarat Fluoro"},{sym:"FSN",name:"Nykaa"},{sym:"GAIL",name:"GAIL"},{sym:"GLENMARK",name:"Glenmark"},{sym:"GMRAIRPORT",name:"GMR Airports"},{sym:"GODREJCP",name:"Godrej Consumer"},{sym:"GODREJPROP",name:"Godrej Properties"},{sym:"GRANULES",name:"Granules"},{sym:"GRASIM",name:"Grasim"},{sym:"GSPL",name:"Gujarat Petronet"},{sym:"HAL",name:"HAL"},{sym:"HAVELLS",name:"Havells"},{sym:"HCLTECH",name:"HCL Tech"},{sym:"HDFCAMC",name:"HDFC AMC"},{sym:"HDFCBANK",name:"HDFC Bank"},{sym:"HDFCLIFE",name:"HDFC Life"},{sym:"HEROMOTOCO",name:"Hero MotoCorp"},{sym:"HINDALCO",name:"Hindalco"},{sym:"HINDCOPPER",name:"Hindustan Copper"},{sym:"HINDUNILVR",name:"HUL"},{sym:"HINDZINC",name:"Hindustan Zinc"},{sym:"HUDCO",name:"HUDCO"},{sym:"ICICIBANK",name:"ICICI Bank"},{sym:"ICICIGI",name:"ICICI Lombard"},{sym:"ICICIPRULI",name:"ICICI Pru Life"},{sym:"IDEA",name:"Vodafone Idea"},{sym:"IDFCFIRSTB",name:"IDFC First Bank"},{sym:"IEX",name:"IEX"},{sym:"IGL",name:"IGL"},{sym:"INDHOTEL",name:"Indian Hotels"},{sym:"INDIAMART",name:"IndiaMART"},{sym:"INDIGO",name:"IndiGo"},{sym:"INDUSINDBK",name:"IndusInd Bank"},{sym:"INDUSTOWER",name:"Indus Towers"},{sym:"INFY",name:"Infosys"},{sym:"IOC",name:"Indian Oil"},{sym:"IRCTC",name:"IRCTC"},{sym:"IRFC",name:"IRFC"},{sym:"ITC",name:"ITC"},{sym:"JINDALSTEL",name:"Jindal Steel"},{sym:"JKCEMENT",name:"JK Cement"},{sym:"JSL",name:"Jindal Stainless"},{sym:"JSWENERGY",name:"JSW Energy"},{sym:"JSWSTEEL",name:"JSW Steel"},{sym:"JUBLFOOD",name:"Jubilant Food"},{sym:"KAJARIACER",name:"Kajaria"},{sym:"KALYANKJIL",name:"Kalyan Jewellers"},{sym:"KOTAKBANK",name:"Kotak Bank"},{sym:"KPITTECH",name:"KPIT Tech"},{sym:"LT",name:"L&T"},{sym:"LICHSGFIN",name:"LIC Housing"},{sym:"LICI",name:"LIC"},{sym:"LODHA",name:"Lodha"},{sym:"LTIM",name:"LTIMindtree"},{sym:"LTTS",name:"L&T Tech"},{sym:"LUPIN",name:"Lupin"},{sym:"M&M",name:"M&M"},{sym:"M&MFIN",name:"M&M Financial"},{sym:"MARICO",name:"Marico"},{sym:"MARUTI",name:"Maruti"},{sym:"MAXHEALTH",name:"Max Healthcare"},{sym:"MFSL",name:"Max Financial"},{sym:"MPHASIS",name:"Mphasis"},{sym:"MUTHOOTFIN",name:"Muthoot Finance"},{sym:"NATIONALUM",name:"National Aluminium"},{sym:"NAUKRI",name:"Info Edge"},{sym:"NAVINFLUOR",name:"Navin Fluorine"},{sym:"NESTLEIND",name:"Nestle India"},{sym:"NHPC",name:"NHPC"},{sym:"NMDC",name:"NMDC"},{sym:"NTPC",name:"NTPC"},{sym:"OBEROIRLTY",name:"Oberoi Realty"},{sym:"OFSS",name:"Oracle Financial"},{sym:"ONGC",name:"ONGC"},{sym:"PAGEIND",name:"Page Industries"},{sym:"PATANJALI",name:"Patanjali Foods"},{sym:"PAYTM",name:"Paytm"},{sym:"PERSISTENT",name:"Persistent"},{sym:"PFC",name:"PFC"},{sym:"PIIND",name:"PI Industries"},{sym:"PIDILITIND",name:"Pidilite"},{sym:"POLICYBZR",name:"PolicyBazaar"},{sym:"POLYCAB",name:"Polycab"},{sym:"PNB",name:"Punjab National Bank"},{sym:"POONAWALLA",name:"Poonawalla Fincorp"},{sym:"POWERGRID",name:"Power Grid"},{sym:"PRESTIGE",name:"Prestige"},{sym:"RAMCOCEM",name:"Ramco Cements"},{sym:"RECLTD",name:"REC"},{sym:"RELIANCE",name:"Reliance"},{sym:"RVNL",name:"RVNL"},{sym:"SAIL",name:"SAIL"},{sym:"SBICARD",name:"SBI Cards"},{sym:"SBILIFE",name:"SBI Life"},{sym:"SBIN",name:"SBI"},{sym:"SCHAEFFLER",name:"Schaeffler"},{sym:"SHREECEM",name:"Shree Cement"},{sym:"SHRIRAMFIN",name:"Shriram Finance"},{sym:"SIEMENS",name:"Siemens"},{sym:"SJVN",name:"SJVN"},{sym:"SOLARINDS",name:"Solar Industries"},{sym:"SONACOMS",name:"Sona BLW"},{sym:"STARHEALTH",name:"Star Health"},{sym:"SUNPHARMA",name:"Sun Pharma"},{sym:"SUNTV",name:"Sun TV"},{sym:"SUZLON",name:"Suzlon"},{sym:"SWIGGY",name:"Swiggy"},{sym:"TATACHEM",name:"Tata Chemicals"},{sym:"TATACOMM",name:"Tata Comm"},{sym:"TATACONSUM",name:"Tata Consumer"},{sym:"TATAELXSI",name:"Tata Elxsi"},{sym:"TATAMOTORS",name:"Tata Motors"},{sym:"TATAPOWER",name:"Tata Power"},{sym:"TATASTEEL",name:"Tata Steel"},{sym:"TCS",name:"TCS"},{sym:"TECHM",name:"Tech Mahindra"},{sym:"TIINDIA",name:"Tube Investments"},{sym:"TITAN",name:"Titan"},{sym:"TORNTPHARM",name:"Torrent Pharma"},{sym:"TORNTPOWER",name:"Torrent Power"},{sym:"TRENT",name:"Trent"},{sym:"TVSMOTOR",name:"TVS Motor"},{sym:"UBL",name:"United Breweries"},{sym:"ULTRACEMCO",name:"UltraTech"},{sym:"UNIONBANK",name:"Union Bank"},{sym:"UPL",name:"UPL"},{sym:"VBL",name:"Varun Beverages"},{sym:"VEDL",name:"Vedanta"},{sym:"VOLTAS",name:"Voltas"},{sym:"WIPRO",name:"Wipro"},{sym:"YESBANK",name:"Yes Bank"},{sym:"ZOMATO",name:"Zomato"},{sym:"ZYDUSLIFE",name:"Zydus"}
 ];
@@ -316,7 +433,6 @@ function MiniChart(props) {
   var x = function(ts){ return PAD.l + ((ts - minT) / (maxT - minT)) * iw; };
   var y = function(v){ return PAD.t + ih - ((v - minV) / range) * ih; };
 
-  // candle width calculation
   var slot = iw / data.length;
   var bodyW = Math.max(1, Math.min(10, slot * 0.7));
 
@@ -399,6 +515,13 @@ function MiniChart(props) {
   );
 }
 
+function ExportBtn(props) {
+  return <button onClick={props.onClick}
+    style={{ background:"#0369a1", color:"#fff", border:"none", borderRadius:8, padding:"6px 12px", fontSize:12, fontWeight:700, cursor:"pointer", whiteSpace:"nowrap" }}>
+    {props.label || "📥 Export"}
+  </button>;
+}
+
 function PortfolioView(props) {
   var stocks = props.stocks;
   var onSelect = props.onSelect;
@@ -422,6 +545,10 @@ function PortfolioView(props) {
   ];
   return (
     <div style={{padding:"0 16px 20px"}}>
+      <div style={{display:"flex", gap:6, marginBottom:10, flexWrap:"wrap"}}>
+        <ExportBtn label="📥 Portfolio Summary" onClick={function(){ exportPortfolioSummary(stocks); }} />
+        <ExportBtn label="📥 All Trades" onClick={function(){ exportAllTrades(stocks); }} />
+      </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(90px,1fr))",gap:8,marginBottom:14}}>
         {statCards.map(function(c,i){
           return <div key={i} style={card({padding:"10px 12px",textAlign:"center"})}>
@@ -643,6 +770,9 @@ function App() {
           </div>
         </div>}
         {view === "trades" && <div style={{ padding:"0 16px 20px", display:"flex", flexDirection:"column", gap:8 }}>
+          <div style={{display:"flex", gap:6, flexWrap:"wrap"}}>
+            <ExportBtn label="📥 Export Trades CSV" onClick={function(){ exportTrades(s); }} />
+          </div>
           {s.trades.length === 0 && !s.openPosition && <div style={{ color:C.muted, textAlign:"center", padding:40 }}>कोई closed trade नहीं।</div>}
           {s.trades.map(function(t,i){
             return <div key={i} style={{ background:"#04130b", border:"1px solid #166534", borderRadius:10, padding:"10px 14px" }}>
@@ -690,36 +820,41 @@ function App() {
             </div>;
           })}
         </div>}
-        {view === "table" && <div style={{ overflowX:"auto", padding:"0 0 20px" }}>
-          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11 }}>
-            <thead>
-              <tr style={{ background:C.card }}>
-                {["Date","Close","20D Low","20D High","GTT Price","Event"].map(function(h){
-                  return <th key={h} style={{ padding:"8px", textAlign:["Date","Event"].indexOf(h)>=0?"left":"right", color:C.muted, fontWeight:600, borderBottom:"1px solid " + C.border, whiteSpace:"nowrap", fontSize:10 }}>{h}</th>;
+        {view === "table" && <div style={{ padding:"0 0 20px" }}>
+          <div style={{padding:"0 16px 8px", display:"flex", gap:6, flexWrap:"wrap"}}>
+            <ExportBtn label="📥 Export Full Table CSV" onClick={function(){ exportTable(s); }} />
+          </div>
+          <div style={{ overflowX:"auto" }}>
+            <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11 }}>
+              <thead>
+                <tr style={{ background:C.card }}>
+                  {["Date","Close","20D Low","20D High","GTT Price","Event"].map(function(h){
+                    return <th key={h} style={{ padding:"8px", textAlign:["Date","Event"].indexOf(h)>=0?"left":"right", color:C.muted, fontWeight:600, borderBottom:"1px solid " + C.border, whiteSpace:"nowrap", fontSize:10 }}>{h}</th>;
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {s.rows.slice().reverse().map(function(r,i){
+                  var isBuy = r.events && r.events.includes("buy");
+                  var isTarget = r.events && r.events.includes("target");
+                  var isGtt = r.events && r.events.includes("gtt-placed");
+                  var bg = isTarget ? C.gttBg : isBuy ? C.buyBg : "transparent";
+                  return <tr key={i} style={{ background: bg, borderBottom:"1px solid #0d1a2a" }}>
+                    <td style={{ padding:"6px 8px", color:C.dim, whiteSpace:"nowrap", fontFamily:"monospace", fontSize:10 }}>{fmtD(r.date)}</td>
+                    <td style={{ padding:"6px 8px", textAlign:"right", fontWeight:600, fontFamily:"monospace" }}>{fmtN(r.close)}</td>
+                    <td style={{ padding:"6px 8px", textAlign:"right", color:C.low, fontFamily:"monospace" }}>{r.d20L ? fmtN(r.d20L) : "—"}</td>
+                    <td style={{ padding:"6px 8px", textAlign:"right", color:C.high, fontFamily:"monospace" }}>{r.d20H ? fmtN(r.d20H) : "—"}</td>
+                    <td style={{ padding:"6px 8px", textAlign:"right", color:C.gtt, fontFamily:"monospace" }}>{r.gttPrice ? fmtN(r.gttPrice) : "—"}</td>
+                    <td style={{ padding:"6px 8px", fontSize:10, whiteSpace:"nowrap" }}>
+                      {isGtt && <span style={{ color:C.gtt, marginRight:6 }}>🔔 GTT</span>}
+                      {isBuy && <span style={{ color:C.buy, marginRight:6 }}>✅ BUY</span>}
+                      {isTarget && <span style={{ color:C.gtt }}>🎯 TARGET</span>}
+                    </td>
+                  </tr>;
                 })}
-              </tr>
-            </thead>
-            <tbody>
-              {s.rows.slice().reverse().map(function(r,i){
-                var isBuy = r.events && r.events.includes("buy");
-                var isTarget = r.events && r.events.includes("target");
-                var isGtt = r.events && r.events.includes("gtt-placed");
-                var bg = isTarget ? C.gttBg : isBuy ? C.buyBg : "transparent";
-                return <tr key={i} style={{ background: bg, borderBottom:"1px solid #0d1a2a" }}>
-                  <td style={{ padding:"6px 8px", color:C.dim, whiteSpace:"nowrap", fontFamily:"monospace", fontSize:10 }}>{fmtD(r.date)}</td>
-                  <td style={{ padding:"6px 8px", textAlign:"right", fontWeight:600, fontFamily:"monospace" }}>{fmtN(r.close)}</td>
-                  <td style={{ padding:"6px 8px", textAlign:"right", color:C.low, fontFamily:"monospace" }}>{r.d20L ? fmtN(r.d20L) : "—"}</td>
-                  <td style={{ padding:"6px 8px", textAlign:"right", color:C.high, fontFamily:"monospace" }}>{r.d20H ? fmtN(r.d20H) : "—"}</td>
-                  <td style={{ padding:"6px 8px", textAlign:"right", color:C.gtt, fontFamily:"monospace" }}>{r.gttPrice ? fmtN(r.gttPrice) : "—"}</td>
-                  <td style={{ padding:"6px 8px", fontSize:10, whiteSpace:"nowrap" }}>
-                    {isGtt && <span style={{ color:C.gtt, marginRight:6 }}>🔔 GTT</span>}
-                    {isBuy && <span style={{ color:C.buy, marginRight:6 }}>✅ BUY</span>}
-                    {isTarget && <span style={{ color:C.gtt }}>🎯 TARGET</span>}
-                  </td>
-                </tr>;
-              })}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         </div>}
         {view === "portfolio" && <PortfolioView stocks={stocks} onSelect={function(i){ setActive(i); setView("chart"); }} />}
       </div>}
