@@ -316,97 +316,84 @@ function calcPortfolioStats(stocks) {
   };
 }
 
-// ---------- EXPORT FUNCTIONS ----------
-function exportTrades(stock) {
-  if (!stock) return;
-  var rows = [["Stock","Entry Date","Entry Price","Exit Date","Exit Price","Days Held","Pct Gain"]];
-  stock.trades.forEach(function(t){
-    rows.push([
-      stock.name,
-      fmtD(t.entryDate),
-      t.entry.toFixed(2),
-      fmtD(t.exitDate),
-      t.exit.toFixed(2),
-      t.days,
-      t.pct.toFixed(2)
-    ]);
-  });
-  downloadCSV("trades_" + stock.name.replace(/[^a-z0-9]/gi,"_") + "_" + dateStamp() + ".csv", rows);
-}
-function exportTable(stock) {
-  if (!stock) return;
-  var rows = [["Date","Open","High","Low","Close","Volume","20D Low","20D High","GTT Price","Event","Status"]];
-  stock.rows.forEach(function(r){
-    var ev = (r.events||[]).join(" | ");
-    var st = r.position ? "HOLDING" : (r.gttPrice ? "GTT" : "");
-    rows.push([
-      fmtD(r.date),
-      r.open != null ? r.open.toFixed(2) : "",
-      r.high != null ? r.high.toFixed(2) : "",
-      r.low != null ? r.low.toFixed(2) : "",
-      r.close != null ? r.close.toFixed(2) : "",
-      r.vol || 0,
-      r.d20L != null ? r.d20L.toFixed(2) : "",
-      r.d20H != null ? r.d20H.toFixed(2) : "",
-      r.gttPrice != null ? r.gttPrice.toFixed(2) : "",
-      ev, st
-    ]);
-  });
-  downloadCSV("signals_" + stock.name.replace(/[^a-z0-9]/gi,"_") + "_" + dateStamp() + ".csv", rows);
-}
-function exportAllTrades(stocks) {
-  var rows = [["Stock","Entry Date","Entry Price","Exit Date","Exit Price","Days Held","Pct Gain"]];
-  stocks.forEach(function(s){
-    (s.trades || []).forEach(function(t){
-      rows.push([
-        s.name,
-        fmtD(t.entryDate),
-        t.entry.toFixed(2),
-        fmtD(t.exitDate),
-        t.exit.toFixed(2),
-        t.days,
-        t.pct.toFixed(2)
-      ]);
-    });
-  });
-  downloadCSV("all_trades_" + dateStamp() + ".csv", rows);
-}
-function exportPortfolioSummary(stocks) {
-  var stats = calcPortfolioStats(stocks);
-  if (!stats) return;
-  var rows = [
-    ["=== PORTFOLIO SUMMARY ===", ""],
-    ["Generated", new Date().toLocaleString("en-IN")],
-    ["", ""],
-    ["Total Stocks", stats.totalStocks],
-    ["Total Trades", stats.totalTrades],
-    ["Wins", stats.wins],
-    ["Losses", stats.losses],
-    ["Win Rate %", stats.winRate.toFixed(2)],
-    ["Gross Profit %", stats.grossWin.toFixed(2)],
-    ["Gross Loss %", stats.grossLoss.toFixed(2)],
-    ["Net Return %", stats.netPct.toFixed(2)],
-    ["Profit Factor", isFinite(stats.profitFactor) ? stats.profitFactor.toFixed(2) : "Inf"],
-    ["Expectancy %", stats.expectancy.toFixed(2)],
-    ["Avg Win %", stats.avgWin.toFixed(2)],
-    ["Avg Loss %", stats.avgLoss.toFixed(2)],
-    ["Avg Hold Days", stats.avgHeldDays.toFixed(2)],
-    ["Holding Now", stats.openCount],
-    ["GTT Active", stats.gttCount],
-    ["Idle", stats.idleCount],
-    ["", ""],
-    ["=== PER STOCK ==="],
-    ["Stock","Trades","Wins","Losses","Win%","Avg Win%","Avg Loss%","Net%","Status","Last Close"]
-  ];
-  stats.perStock.forEach(function(p){
-    rows.push([
-      p.name, p.trades, p.wins, p.losses,
-      p.winRate.toFixed(2), p.avgWin.toFixed(2), p.avgLoss.toFixed(2),
-      p.netPct.toFixed(2), p.status,
-      p.lastClose != null ? p.lastClose.toFixed(2) : ""
-    ]);
-  });
-  downloadCSV("portfolio_summary_" + dateStamp() + ".csv", rows);
+// Screener: हर स्टॉक का आज (latest day) का status
+function calcScreenerRow(stock) {
+  var rows = stock.rows;
+  var last = rows[rows.length - 1];
+  var ev = last.events || [];
+  var status = "IDLE";
+  var label = "⏳ IDLE";
+  var priority = 4;
+  var detail = "";
+  var daysAgo = 0;
+
+  if (stock.openPosition) {
+    status = "HOLDING";
+    label = "📈 HOLDING";
+    priority = 2;
+    detail = "Entry ₹" + fmtN(stock.openPosition.entry) + " → Target ₹" + fmtN(stock.openPosition.target);
+  } else if (stock.pendingGtt) {
+    status = "GTT";
+    label = "🔔 GTT Active";
+    priority = 3;
+    detail = "GTT @ ₹" + fmtN(stock.pendingGtt.price);
+  }
+
+  // देखें पिछले कुछ दिनों में क्या event हुआ
+  for (var i = rows.length - 1; i >= Math.max(0, rows.length - 10); i--) {
+    var r = rows[i];
+    var re = r.events || [];
+    if (re.indexOf("buy") >= 0) {
+      var ago = rows.length - 1 - i;
+      if (ago <= 1) {
+        status = "BUY_TODAY";
+        label = "✅ BUY";
+        priority = 0;
+        detail = "Buy @ ₹" + fmtN(r.gttPrice) + " (" + (ago === 0 ? "आज" : "कल") + ")";
+      }
+      break;
+    }
+    if (re.indexOf("target") >= 0) {
+      var ago2 = rows.length - 1 - i;
+      if (ago2 <= 1) {
+        status = "TARGET_TODAY";
+        label = "🎯 TARGET";
+        priority = 0;
+        detail = "Target hit (" + (ago2 === 0 ? "आज" : "कल") + ")";
+      }
+      break;
+    }
+    if (re.indexOf("gtt-placed") >= 0) {
+      var ago3 = rows.length - 1 - i;
+      if (ago3 <= 1 && status === "IDLE") {
+        status = "NEW_LOW";
+        label = "🆕 New Low";
+        priority = 1;
+        detail = "नया 20D Low → GTT लगा";
+      }
+      break;
+    }
+  }
+
+  // अगर आज नया low बना और GTT active है
+  if (last.newLow && !stock.openPosition && stock.pendingGtt) {
+    status = "NEW_LOW";
+    label = "🆕 New Low";
+    priority = 1;
+    detail = "आज नया Low → GTT @ ₹" + fmtN(stock.pendingGtt.price);
+  }
+
+  return {
+    name: stock.name, status: status, label: label, priority: priority,
+    detail: detail,
+    close: last.close,
+    d20H: last.d20H,
+    d20L: last.d20L,
+    date: last.date,
+    gtt: stock.pendingGtt ? stock.pendingGtt.price : null,
+    target: stock.openPosition ? stock.openPosition.target : null,
+    entry: stock.openPosition ? stock.openPosition.entry : null
+  };
 }
 
 const NIFTY200 = [
@@ -423,7 +410,6 @@ function MiniChart(props) {
   var ih = H - PAD.t - PAD.b;
   var data = rows.filter(function(r){ return r.d20H != null; });
   if (!data.length) return null;
-
   var allVals = [];
   data.forEach(function(r){ allVals.push(r.close, r.d20H, r.d20L, r.high, r.low); });
   var minV = Math.min.apply(null, allVals);
@@ -432,20 +418,16 @@ function MiniChart(props) {
   var minT = data[0].ts, maxT = data[data.length-1].ts;
   var x = function(ts){ return PAD.l + ((ts - minT) / (maxT - minT)) * iw; };
   var y = function(v){ return PAD.t + ih - ((v - minV) / range) * ih; };
-
   var slot = iw / data.length;
   var bodyW = Math.max(1, Math.min(10, slot * 0.7));
-
   var line = function(key){
     return data.map(function(r,i){ return (i?'L':'M') + x(r.ts).toFixed(1) + "," + y(r[key]).toFixed(1); }).join(" ");
   };
-
   var yLabels = [];
   for (var i = 0; i <= 4; i++) yLabels.push(minV + (range*i/4));
   var xticks = Math.min(6, data.length);
   var xIdx = [];
   for (var j = 0; j < xticks; j++) xIdx.push(Math.floor(j*(data.length-1)/(xticks-1||1)));
-
   return (
     <div style={{overflowX:"auto"}}>
       <svg viewBox={"0 0 " + W + " " + H} style={{width:"100%",minWidth:340,height:height,display:"block"}}>
@@ -460,7 +442,6 @@ function MiniChart(props) {
             {(data[idx].date.getMonth()+1) + "/" + String(data[idx].date.getFullYear()).slice(2)}
           </text>;
         })}
-
         {chartType === "candle" && data.map(function(r, k){
           var cx = x(r.ts);
           var up = r.close >= r.open;
@@ -473,12 +454,9 @@ function MiniChart(props) {
             <rect x={cx - bodyW/2} y={top} width={bodyW} height={bh} fill={col} stroke={col} strokeWidth="0.5" />
           </g>;
         })}
-
         {chartType === "line" && <path d={line("close")} fill="none" stroke="#60a5fa" strokeWidth="2" />}
-
         <path d={line("d20H")} fill="none" stroke="#f87171" strokeWidth="1.2" strokeDasharray="5 3" />
         <path d={line("d20L")} fill="none" stroke="#34d399" strokeWidth="1.2" strokeDasharray="5 3" />
-
         {data.map(function(r,k){
           var ev = r.events || [];
           if (ev.indexOf("target") >= 0) return <circle key={"t"+k} cx={x(r.ts)} cy={y(r.high)} r="5" fill="#fbbf24" stroke="#1c1407" strokeWidth="1.5" />;
@@ -486,7 +464,6 @@ function MiniChart(props) {
           if (ev.indexOf("gtt-placed") >= 0) return <circle key={"g"+k} cx={x(r.ts)} cy={y(r.low)} r="3" fill="#fbbf24" />;
           return null;
         })}
-
         {data.map(function(r,k){
           return <rect key={k} x={x(r.ts)-slot/2} y={PAD.t} width={slot} height={ih} fill="transparent"
             onMouseEnter={function(){setHover(r);}} onTouchStart={function(){setHover(r);}} />;
@@ -593,6 +570,148 @@ function PortfolioView(props) {
   );
 }
 
+// ---------- SCREENER ----------
+function ScreenerView(props) {
+  var stocks = props.stocks;
+  var onSelect = props.onSelect;
+  var [filter, setFilter] = React.useState("all");
+  var C = { card:"#0f1e33", border:"#1e3352", muted:"#64748b", buy:"#4ade80", high:"#f87171", gtt:"#fbbf24", dim:"#4a6fa5", text:"#dce8f8", accent:"#2563eb" };
+  var card = function(sx){ return Object.assign({ background:C.card, border:"1px solid " + C.border, borderRadius:10 }, sx || {}); };
+
+  if (!stocks || !stocks.length) {
+    return <div style={{padding:40,textAlign:"center",color:C.muted}}>
+      <div style={{fontSize:40, marginBottom:10}}>🔍</div>
+      <div>पहले कुछ स्टॉक्स लोड करें — फिर यहाँ स्क्रीनर दिखेगा।</div>
+    </div>;
+  }
+
+  var rows = stocks.map(function(s, idx){
+    var r = calcScreenerRow(s);
+    r.idx = idx;
+    return r;
+  });
+
+  rows.sort(function(a,b){
+    if (a.priority !== b.priority) return a.priority - b.priority;
+    return a.name.localeCompare(b.name);
+  });
+
+  var filtered = rows;
+  if (filter === "buy") filtered = rows.filter(function(r){ return r.status === "BUY_TODAY"; });
+  else if (filter === "gtt") filtered = rows.filter(function(r){ return r.status === "GTT" || r.status === "NEW_LOW"; });
+  else if (filter === "holding") filtered = rows.filter(function(r){ return r.status === "HOLDING"; });
+  else if (filter === "newlow") filtered = rows.filter(function(r){ return r.status === "NEW_LOW"; });
+  else if (filter === "target") filtered = rows.filter(function(r){ return r.status === "TARGET_TODAY"; });
+
+  var counts = {
+    all: rows.length,
+    buy: rows.filter(function(r){ return r.status === "BUY_TODAY"; }).length,
+    gtt: rows.filter(function(r){ return r.status === "GTT" || r.status === "NEW_LOW"; }).length,
+    holding: rows.filter(function(r){ return r.status === "HOLDING"; }).length,
+    newlow: rows.filter(function(r){ return r.status === "NEW_LOW"; }).length,
+    target: rows.filter(function(r){ return r.status === "TARGET_TODAY"; }).length
+  };
+
+  var filters = [
+    { key:"all", lbl:"All", count: counts.all },
+    { key:"buy", lbl:"✅ Buy Today", count: counts.buy },
+    { key:"newlow", lbl:"🆕 New Low", count: counts.newlow },
+    { key:"gtt", lbl:"🔔 GTT", count: counts.gtt },
+    { key:"holding", lbl:"📈 Holding", count: counts.holding },
+    { key:"target", lbl:"🎯 Target", count: counts.target }
+  ];
+
+  function exportScreener() {
+    var data = [["Stock","Status","Detail","Latest Close","20D High","20D Low","GTT Price","Entry","Target","As of"]];
+    rows.forEach(function(r){
+      data.push([
+        r.name, r.status, r.detail,
+        r.close != null ? r.close.toFixed(2) : "",
+        r.d20H != null ? r.d20H.toFixed(2) : "",
+        r.d20L != null ? r.d20L.toFixed(2) : "",
+        r.gtt != null ? r.gtt.toFixed(2) : "",
+        r.entry != null ? r.entry.toFixed(2) : "",
+        r.target != null ? r.target.toFixed(2) : "",
+        fmtD(r.date)
+      ]);
+    });
+    downloadCSV("screener_" + dateStamp() + ".csv", data);
+  }
+
+  return (
+    <div style={{padding:"0 16px 20px"}}>
+      <div style={{display:"flex", gap:6, marginBottom:10, flexWrap:"wrap"}}>
+        {filters.map(function(f){
+          return <button key={f.key} onClick={function(){ setFilter(f.key); }}
+            style={{
+              background: filter===f.key ? C.accent : "none",
+              color: filter===f.key ? "#fff" : C.muted,
+              border: "1px solid " + (filter===f.key ? C.accent : C.border),
+              borderRadius: 20, padding:"6px 12px", fontSize:12, cursor:"pointer",
+              fontWeight: filter===f.key ? 700 : 400, whiteSpace:"nowrap"
+            }}>
+            {f.lbl} <span style={{opacity:0.8}}>({f.count})</span>
+          </button>;
+        })}
+      </div>
+
+      <div style={{display:"flex", gap:6, marginBottom:10, flexWrap:"wrap"}}>
+        <ExportBtn label="📥 Export Screener CSV" onClick={exportScreener} />
+      </div>
+
+      {filtered.length === 0 && <div style={{...card({padding:30}), textAlign:"center", color:C.muted}}>
+        इस filter में कोई स्टॉक नहीं।
+      </div>}
+
+      {filtered.length > 0 && <div style={card({overflow:"hidden"})}>
+        <div style={{overflowX:"auto"}}>
+          <table style={{width:"100%", borderCollapse:"collapse", fontSize:11, minWidth:600}}>
+            <thead>
+              <tr style={{background:"#0a1626"}}>
+                {["Stock","Status","Detail","Close","20D High","20D Low","GTT","Target"].map(function(h){
+                  return <th key={h} style={{padding:"8px", textAlign:"left", color:C.muted, fontWeight:600, borderBottom:"1px solid " + C.border, whiteSpace:"nowrap", fontSize:10}}>{h}</th>;
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(function(r, i){
+                var bg = "transparent";
+                if (r.status === "BUY_TODAY") bg = "rgba(74,222,128,0.10)";
+                else if (r.status === "TARGET_TODAY") bg = "rgba(251,191,36,0.10)";
+                else if (r.status === "NEW_LOW") bg = "rgba(96,165,250,0.08)";
+                else if (r.status === "GTT") bg = "rgba(251,191,36,0.05)";
+                else if (r.status === "HOLDING") bg = "rgba(74,222,128,0.05)";
+
+                var statusColor = C.muted;
+                if (r.status === "BUY_TODAY" || r.status === "HOLDING") statusColor = C.buy;
+                else if (r.status === "GTT" || r.status === "TARGET_TODAY") statusColor = C.gtt;
+                else if (r.status === "NEW_LOW") statusColor = "#60a5fa";
+
+                return <tr key={i} style={{background:bg, borderBottom:"1px solid #0d1a2a", cursor:"pointer"}}
+                  onClick={function(){ onSelect(r.idx); }}>
+                  <td style={{padding:"8px", color:"#93c5fd", fontWeight:600, whiteSpace:"nowrap"}}>{r.name}</td>
+                  <td style={{padding:"8px", color:statusColor, fontWeight:700, fontSize:10, whiteSpace:"nowrap"}}>{r.label}</td>
+                  <td style={{padding:"8px", color:C.muted, fontSize:10}}>{r.detail || "—"}</td>
+                  <td style={{padding:"8px", fontFamily:"monospace", color:C.text}}>{fmtN(r.close)}</td>
+                  <td style={{padding:"8px", fontFamily:"monospace", color:C.high}}>{fmtN(r.d20H)}</td>
+                  <td style={{padding:"8px", fontFamily:"monospace", color:C.buy}}>{fmtN(r.d20L)}</td>
+                  <td style={{padding:"8px", fontFamily:"monospace", color:C.gtt}}>{r.gtt != null ? fmtN(r.gtt) : "—"}</td>
+                  <td style={{padding:"8px", fontFamily:"monospace", color:"#93c5fd"}}>{r.target != null ? fmtN(r.target) : "—"}</td>
+                </tr>;
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>}
+
+      <div style={{marginTop:12, fontSize:11, color:C.muted, lineHeight:1.7}}>
+        💡 <b>क्लिक</b> करके चार्ट देखें। <br/>
+        <b>Priority:</b> ✅ Buy Today → 🆕 New Low → 🔔 GTT → 📈 Holding → ⏳ Idle
+      </div>
+    </div>
+  );
+}
+
 function App() {
   var st = React.useState([]); var stocks = st[0]; var setStocks = st[1];
   var ac = React.useState(0); var active = ac[0]; var setActive = ac[1];
@@ -605,6 +724,10 @@ function App() {
   var ch = React.useState("candle"); var chartType = ch[0]; var setChartType = ch[1];
   var su = React.useState(function(){ try { return localStorage.getItem(SHEET_URL_KEY) || ""; } catch(e) { return ""; } });
   var sheetUrl = su[0]; var setSheetUrl = su[1];
+  var bl = React.useState(""); var bulkTxt = bl[0]; var setBulkTxt = bl[1];
+  var bm = React.useState(false); var bulkModal = bm[0]; var setBulkModal = bm[1];
+  var bprog = React.useState({current:0, total:0, msg:""}); var bulkProg = bprog[0]; var setBulkProg = bprog[1];
+  var berr = React.useState([]); var bulkErrors = berr[0]; var setBulkErrors = berr[1];
 
   function saveSheetUrl(u) {
     setSheetUrl(u);
@@ -614,7 +737,7 @@ function App() {
   function handleAdd(csvRaw, lbl) {
     setErr("");
     var parsed = parseCSV(csvRaw);
-    if (parsed.error) { setErr(parsed.error); return false; }
+    if (parsed.error) { return { error: parsed.error }; }
     var res = calcSignals(parsed.rows);
     var name = (lbl && lbl.trim()) || parsed.stockName || ("Stock " + (stocks.length + 1));
     var newStock = { name: name, rows: res.rows, trades: res.trades, openPosition: res.openPosition, pendingGtt: res.pendingGtt };
@@ -630,20 +753,23 @@ function App() {
       setActive(p.length);
       return p.concat([newStock]);
     });
-    return true;
+    return { ok: true, name: name };
   }
 
   function submitAdd() {
     var fullName = label ? "NSE:" + label.replace(/^NSE:/i, "") : "";
-    if (handleAdd(csvTxt, fullName)) { setCsvTxt(""); setLabel(""); setModal(false); }
+    var res = handleAdd(csvTxt, fullName);
+    if (res.error) { setErr(res.error); return; }
+    setCsvTxt(""); setLabel(""); setModal(false);
   }
 
   function directLoad() {
     if (!label || !label.trim()) { setErr("पहले stock चुनें"); return; }
     setErr(""); setLoading(label + " का data ला रहे हैं...");
     fetchFromYahoo(label.trim()).then(function(r){
-      var ok = handleAdd(r.csv, r.name);
-      if (ok) { setCsvTxt(""); setLabel(""); setModal(false); }
+      var res = handleAdd(r.csv, r.name);
+      if (res.error) { setErr("❌ " + res.error); return; }
+      setCsvTxt(""); setLabel(""); setModal(false);
     }).catch(function(e){ setErr("❌ " + e.message); }).finally(function(){ setLoading(""); });
   }
 
@@ -651,9 +777,36 @@ function App() {
     if (!sheetUrl || !sheetUrl.trim()) { setErr("पहले Sheet की URL paste करें"); return; }
     setErr(""); setLoading("Google Sheet से data ला रहे हैं...");
     fetchFromSheet(sheetUrl.trim()).then(function(r){
-      var ok = handleAdd(r.csv, "");
-      if (ok) { setCsvTxt(""); setLabel(""); setModal(false); }
+      var res = handleAdd(r.csv, "");
+      if (res.error) { setErr("❌ " + res.error); return; }
+      setCsvTxt(""); setLabel(""); setModal(false);
     }).catch(function(e){ setErr("❌ " + e.message); }).finally(function(){ setLoading(""); });
+  }
+
+  async function bulkLoad() {
+    var symbols = bulkTxt.split(/[\n,\s]+/).map(function(s){ return s.trim().toUpperCase().replace(/^NSE:/, ""); }).filter(Boolean);
+    var unique = [];
+    for (var i = 0; i < symbols.length; i++) if (unique.indexOf(symbols[i]) === -1) unique.push(symbols[i]);
+    if (!unique.length) return;
+    setBulkErrors([]);
+    setBulkProg({current: 0, total: unique.length, msg: "शुरू हो रहा है..."});
+    var errs = [];
+    for (var i2 = 0; i2 < unique.length; i2++) {
+      var sym = unique[i2];
+      setBulkProg({current: i2 + 1, total: unique.length, msg: sym + " fetch कर रहे हैं..."});
+      try {
+        var r = await fetchFromYahoo(sym);
+        var res = handleAdd(r.csv, r.name);
+        if (res.error) errs.push(sym + ": " + res.error);
+      } catch (e) {
+        errs.push(sym + ": " + e.message);
+      }
+      // हर fetch के बीच थोड़ा delay (rate limit से बचने के लिए)
+      await new Promise(function(resolve){ setTimeout(resolve, 400); });
+    }
+    setBulkProg({current: unique.length, total: unique.length, msg: "पूरा हुआ ✅"});
+    setBulkErrors(errs);
+    setTimeout(function(){ setBulkProg({current:0,total:0,msg:""}); setBulkModal(false); setBulkTxt(""); }, 1500);
   }
 
   function removeStock(idx) {
@@ -678,6 +831,7 @@ function App() {
     { key:"trades", lbl:"💼 Trades" },
     { key:"log", lbl:"📜 Event Log" },
     { key:"table", lbl:"📋 Table" },
+    { key:"screener", lbl:"🔍 Screener" },
     { key:"portfolio", lbl:"📊 Portfolio" }
   ];
   var events = s ? s.rows.filter(function(r){ return r.events && r.events.length; }) : [];
@@ -689,6 +843,10 @@ function App() {
           <span style={{ fontWeight:700, fontSize:16 }}>📈 20-Day Breakout + GTT</span>
           <span style={{ fontSize:11, color:C.muted, marginLeft:10 }}>6.28% Target</span>
         </div>
+        <button onClick={function(){ setBulkModal(true); }}
+          style={{ background:"#7c3aed", color:"#fff", border:"none", borderRadius:8, padding:"7px 12px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+          ⚡ Bulk
+        </button>
         <button onClick={function(){ setModal(true); }}
           style={{ background:C.accent, color:"#fff", border:"none", borderRadius:8, padding:"7px 14px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
           + Stock
@@ -712,6 +870,10 @@ function App() {
           <button onClick={function(){ setModal(true); }} disabled={!!loading}
             style={{ background:C.accent, color:"#fff", border:"none", borderRadius:10, padding:"11px 22px", fontSize:14, fontWeight:600, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
             + Stock Add करें
+          </button>
+          <button onClick={function(){ setBulkModal(true); }} disabled={!!loading}
+            style={{ background:"#7c3aed", color:"#fff", border:"none", borderRadius:10, padding:"11px 22px", fontSize:14, fontWeight:600, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
+            ⚡ Bulk Add
           </button>
           {sheetUrl && <button onClick={loadFromSheet} disabled={!!loading}
             style={{ background:"#16a34a", color:"#fff", border:"none", borderRadius:10, padding:"11px 22px", fontSize:14, fontWeight:600, cursor:"pointer", opacity: loading ? 0.6 : 1 }}>
@@ -856,18 +1018,16 @@ function App() {
             </table>
           </div>
         </div>}
+        {view === "screener" && <ScreenerView stocks={stocks} onSelect={function(i){ setActive(i); setView("chart"); }} />}
         {view === "portfolio" && <PortfolioView stocks={stocks} onSelect={function(i){ setActive(i); setView("chart"); }} />}
       </div>}
       {modal && <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.8)", display:"flex", alignItems:"flex-end", zIndex:100 }}
         onClick={function(e){ if (e.currentTarget === e.target) { setModal(false); setErr(""); } }}>
         <div style={{ background:"#0d1a2a", borderTop:"1px solid " + C.border, borderRadius:"18px 18px 0 0", padding:20, width:"100%", maxHeight:"90vh", overflowY:"auto" }}>
           <div style={{ fontWeight:700, fontSize:16, marginBottom:18 }}>📥 Stock Add करें</div>
-
           <div style={{ background:"#052e16", border:"1px solid #166534", borderRadius:10, padding:"12px 14px", marginBottom:14 }}>
             <div style={{ fontSize:12, color:"#86efac", fontWeight:700, marginBottom:8 }}>🔗 Google Sheet से</div>
-            <input
-              value={sheetUrl}
-              onChange={function(e){ saveSheetUrl(e.target.value); }}
+            <input value={sheetUrl} onChange={function(e){ saveSheetUrl(e.target.value); }}
               placeholder="Sheet की published CSV URL या Apps Script URL"
               style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:11, fontFamily:"monospace", boxSizing:"border-box", marginBottom:10, outline:"none" }} />
             <button onClick={loadFromSheet} disabled={!!loading}
@@ -875,9 +1035,7 @@ function App() {
               {loading ? "⏳ " + loading : "🔄 Sheet से Load करो"}
             </button>
           </div>
-
           <div style={{ textAlign:"center", fontSize:11, color:C.muted, marginBottom:12 }}>─── या ───</div>
-
           <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>📥 Yahoo से (auto)</label>
           <input list="nifty200-list" value={label} onChange={function(e){ setLabel(e.target.value); }} placeholder="Stock चुनें"
             style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:14, boxSizing:"border-box", marginBottom:10, outline:"none" }} />
@@ -888,22 +1046,57 @@ function App() {
             style={{ width:"100%", background:"#2563eb", color:"#fff", border:"none", borderRadius:8, padding:11, fontSize:14, fontWeight:700, cursor:"pointer", marginBottom:14, opacity: loading ? 0.6 : 1 }}>
             {loading ? "⏳ " + loading : "📥 Yahoo से Load करो"}
           </button>
-
           <div style={{ textAlign:"center", fontSize:11, color:C.muted, marginBottom:12 }}>─── या manual ───</div>
-
           <input type="file" accept=".csv,.txt" onChange={onFile}
             style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:13, boxSizing:"border-box", marginBottom:10 }} />
           <textarea value={csvTxt} onChange={function(e){ setCsvTxt(e.target.value); }} rows={4}
             placeholder={"Date,Open,High,Low,Close,Volume"}
             style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:11, fontFamily:"monospace", resize:"vertical", boxSizing:"border-box", marginBottom:10, outline:"none" }} />
-
           {err && <div style={{ color:"#f87171", background:"rgba(239,68,68,.1)", border:"1px solid rgba(239,68,68,.3)", borderRadius:8, padding:"8px 12px", fontSize:12, marginBottom:12 }}>{err}</div>}
-
           <div style={{ display:"flex", gap:10 }}>
             <button onClick={function(){ setModal(false); setErr(""); setCsvTxt(""); setLabel(""); }}
               style={{ flex:1, background:C.border, color:C.text, border:"none", borderRadius:10, padding:12, fontSize:14, cursor:"pointer" }}>Cancel</button>
             <button onClick={submitAdd}
               style={{ flex:2, background:C.accent, color:"#fff", border:"none", borderRadius:10, padding:12, fontSize:14, fontWeight:700, cursor:"pointer" }}>✅ Manual CSV</button>
+          </div>
+        </div>
+      </div>}
+
+      {bulkModal && <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.8)", display:"flex", alignItems:"flex-end", zIndex:100 }}
+        onClick={function(e){ if (e.currentTarget === e.target && !bulkProg.total) { setBulkModal(false); } }}>
+        <div style={{ background:"#0d1a2a", borderTop:"1px solid " + C.border, borderRadius:"18px 18px 0 0", padding:20, width:"100%", maxHeight:"90vh", overflowY:"auto" }}>
+          <div style={{ fontWeight:700, fontSize:16, marginBottom:6, color:"#c4b5fd" }}>⚡ Bulk Add (Yahoo से)</div>
+          <div style={{ fontSize:11, color:C.muted, marginBottom:14, lineHeight:1.6 }}>
+            नीचे स्टॉक के symbols डालें — एक-एक लाइन पर या comma से अलग।<br/>
+            उदाहरण: <code style={{color:"#93c5fd"}}>RELIANCE, TCS, INFY</code>
+          </div>
+          <textarea value={bulkTxt} onChange={function(e){ setBulkTxt(e.target.value); }}
+            rows={6}
+            placeholder={"RELIANCE\nTCS\nINFY\nHDFCBANK\nICICIBANK"}
+            disabled={!!bulkProg.total}
+            style={{ width:"100%", background:C.bg, border:"1px solid " + C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:12, fontFamily:"monospace", resize:"vertical", boxSizing:"border-box", marginBottom:10, outline:"none", opacity: bulkProg.total ? 0.5 : 1 }} />
+          {bulkProg.total > 0 && <div style={{ background:"#1e1b4b", border:"1px solid #7c3aed", borderRadius:8, padding:"10px 12px", fontSize:12, marginBottom:12 }}>
+            <div style={{color:"#c4b5fd", fontWeight:700, marginBottom:6}}>
+              Progress: {bulkProg.current}/{bulkProg.total}
+            </div>
+            <div style={{background:"#0d1a2a", borderRadius:4, height:8, overflow:"hidden", marginBottom:6}}>
+              <div style={{background:"#7c3aed", height:"100%", width: (bulkProg.current/bulkProg.total*100) + "%", transition:"width 0.3s"}}></div>
+            </div>
+            <div style={{color:C.muted, fontSize:11}}>{bulkProg.msg}</div>
+          </div>}
+          {bulkErrors.length > 0 && <div style={{ background:"rgba(239,68,68,.1)", border:"1px solid rgba(239,68,68,.3)", borderRadius:8, padding:"10px 12px", fontSize:11, marginBottom:12, color:"#fca5a5", maxHeight:150, overflowY:"auto" }}>
+            <div style={{fontWeight:700, marginBottom:6}}>⚠️ कुछ symbols fail हुए:</div>
+            {bulkErrors.map(function(e, i){ return <div key={i}>• {e}</div>; })}
+          </div>}
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={function(){ if (!bulkProg.total) { setBulkModal(false); setBulkErrors([]); } }}
+              disabled={!!bulkProg.total}
+              style={{ flex:1, background:C.border, color:C.text, border:"none", borderRadius:10, padding:12, fontSize:14, cursor: bulkProg.total ? "not-allowed" : "pointer", opacity: bulkProg.total ? 0.5 : 1 }}>Cancel</button>
+            <button onClick={bulkLoad}
+              disabled={!!bulkProg.total || !bulkTxt.trim()}
+              style={{ flex:2, background:"#7c3aed", color:"#fff", border:"none", borderRadius:10, padding:12, fontSize:14, fontWeight:700, cursor: bulkProg.total ? "not-allowed" : "pointer", opacity: (bulkProg.total || !bulkTxt.trim()) ? 0.5 : 1 }}>
+              {bulkProg.total ? "⏳ " + bulkProg.current + "/" + bulkProg.total : "⚡ Bulk Load करो"}
+            </button>
           </div>
         </div>
       </div>}
