@@ -208,6 +208,55 @@ function calcSignals(rows) {
   return { rows: enriched, trades: trades, openPosition: openPosition, pendingGtt: pendingGtt };
 }
 
+function calcPortfolioStats(stocks) {
+  if (!stocks || !stocks.length) return null;
+  var totalTrades = 0, wins = 0, losses = 0, grossWin = 0, grossLoss = 0;
+  var heldDays = 0, openCount = 0, gttCount = 0, idleCount = 0;
+  var perStock = [];
+  for (var i = 0; i < stocks.length; i++) {
+    var s = stocks[i];
+    var t = s.trades || [];
+    var w = 0, l = 0, sw = 0, sl = 0, d = 0;
+    for (var j = 0; j < t.length; j++) {
+      var tr = t[j];
+      if (tr.pct > 0) { w++; sw += tr.pct; }
+      else { l++; sl += Math.abs(tr.pct); }
+      d += (tr.days || 0);
+    }
+    totalTrades += t.length; wins += w; losses += l;
+    grossWin += sw; grossLoss += sl; heldDays += d;
+    var status = s.openPosition ? "HOLDING" : (s.pendingGtt ? "GTT" : "IDLE");
+    if (s.openPosition) openCount++;
+    else if (s.pendingGtt) gttCount++;
+    else idleCount++;
+    var lastRow = s.rows && s.rows.length ? s.rows[s.rows.length - 1] : null;
+    perStock.push({
+      name: s.name, trades: t.length, wins: w, losses: l,
+      winRate: t.length ? (w / t.length) * 100 : 0,
+      avgWin: w ? sw / w : 0,
+      avgLoss: l ? sl / l : 0,
+      netPct: sw - sl, status: status,
+      lastClose: lastRow ? lastRow.close : null
+    });
+  }
+  var winRate = totalTrades ? (wins / totalTrades) * 100 : 0;
+  var avgWin = wins ? grossWin / wins : 0;
+  var avgLoss = losses ? grossLoss / losses : 0;
+  var profitFactor = grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : 0);
+  var expectancy = totalTrades ? ((wins / totalTrades) * avgWin - (losses / totalTrades) * avgLoss) : 0;
+  return {
+    totalStocks: stocks.length, totalTrades: totalTrades,
+    wins: wins, losses: losses, winRate: winRate,
+    avgWin: avgWin, avgLoss: avgLoss,
+    grossWin: grossWin, grossLoss: grossLoss,
+    netPct: grossWin - grossLoss,
+    profitFactor: profitFactor, expectancy: expectancy,
+    openCount: openCount, gttCount: gttCount, idleCount: idleCount,
+    avgHeldDays: totalTrades ? heldDays / totalTrades : 0,
+    perStock: perStock
+  };
+}
+
 const NIFTY200 = [
   {sym:"ABB",name:"ABB India"},{sym:"ABCAPITAL",name:"Aditya Birla Capital"},{sym:"ABFRL",name:"Aditya Birla Fashion"},{sym:"ADANIENT",name:"Adani Enterprises"},{sym:"ADANIENSOL",name:"Adani Energy Solutions"},{sym:"ADANIGREEN",name:"Adani Green Energy"},{sym:"ADANIPORTS",name:"Adani Ports"},{sym:"ADANIPOWER",name:"Adani Power"},{sym:"ALKEM",name:"Alkem Labs"},{sym:"AMBUJACEM",name:"Ambuja Cements"},{sym:"APOLLOHOSP",name:"Apollo Hospitals"},{sym:"APOLLOTYRE",name:"Apollo Tyres"},{sym:"ASHOKLEY",name:"Ashok Leyland"},{sym:"ASIANPAINT",name:"Asian Paints"},{sym:"ASTRAL",name:"Astral"},{sym:"ATUL",name:"Atul"},{sym:"ATGL",name:"Adani Total Gas"},{sym:"AUROPHARMA",name:"Aurobindo Pharma"},{sym:"AWL",name:"Adani Wilmar"},{sym:"AXISBANK",name:"Axis Bank"},{sym:"BAJAJ-AUTO",name:"Bajaj Auto"},{sym:"BAJAJFINSV",name:"Bajaj Finserv"},{sym:"BAJAJHLDNG",name:"Bajaj Holdings"},{sym:"BAJFINANCE",name:"Bajaj Finance"},{sym:"BALKRISIND",name:"Balkrishna Industries"},{sym:"BANDHANBNK",name:"Bandhan Bank"},{sym:"BANKBARODA",name:"Bank of Baroda"},{sym:"BEL",name:"Bharat Electronics"},{sym:"BERGEPAINT",name:"Berger Paints"},{sym:"BHARTIARTL",name:"Bharti Airtel"},{sym:"BHEL",name:"BHEL"},{sym:"BIOCON",name:"Biocon"},{sym:"BOSCHLTD",name:"Bosch"},{sym:"BPCL",name:"BPCL"},{sym:"BRITANNIA",name:"Britannia"},{sym:"BSE",name:"BSE"},{sym:"CANBK",name:"Canara Bank"},{sym:"CDSL",name:"CDSL"},{sym:"CESC",name:"CESC"},{sym:"CGPOWER",name:"CG Power"},{sym:"CHOLAFIN",name:"Cholamandalam"},{sym:"CIPLA",name:"Cipla"},{sym:"COALINDIA",name:"Coal India"},{sym:"COFORGE",name:"Coforge"},{sym:"COLPAL",name:"Colgate"},{sym:"CONCOR",name:"Container Corp"},{sym:"CUMMINSIND",name:"Cummins India"},{sym:"DABUR",name:"Dabur"},{sym:"DEEPAKNTR",name:"Deepak Nitrite"},{sym:"DELHIVERY",name:"Delhivery"},{sym:"DIVISLAB",name:"Divi's Labs"},{sym:"DIXON",name:"Dixon Tech"},{sym:"DLF",name:"DLF"},{sym:"DRREDDY",name:"Dr Reddy's"},{sym:"EICHERMOT",name:"Eicher Motors"},{sym:"FACT",name:"FACT"},{sym:"FEDERALBNK",name:"Federal Bank"},{sym:"FLUOROCHEM",name:"Gujarat Fluoro"},{sym:"FSN",name:"Nykaa"},{sym:"GAIL",name:"GAIL"},{sym:"GLENMARK",name:"Glenmark"},{sym:"GMRAIRPORT",name:"GMR Airports"},{sym:"GODREJCP",name:"Godrej Consumer"},{sym:"GODREJPROP",name:"Godrej Properties"},{sym:"GRANULES",name:"Granules"},{sym:"GRASIM",name:"Grasim"},{sym:"GSPL",name:"Gujarat Petronet"},{sym:"HAL",name:"HAL"},{sym:"HAVELLS",name:"Havells"},{sym:"HCLTECH",name:"HCL Tech"},{sym:"HDFCAMC",name:"HDFC AMC"},{sym:"HDFCBANK",name:"HDFC Bank"},{sym:"HDFCLIFE",name:"HDFC Life"},{sym:"HEROMOTOCO",name:"Hero MotoCorp"},{sym:"HINDALCO",name:"Hindalco"},{sym:"HINDCOPPER",name:"Hindustan Copper"},{sym:"HINDUNILVR",name:"HUL"},{sym:"HINDZINC",name:"Hindustan Zinc"},{sym:"HUDCO",name:"HUDCO"},{sym:"ICICIBANK",name:"ICICI Bank"},{sym:"ICICIGI",name:"ICICI Lombard"},{sym:"ICICIPRULI",name:"ICICI Pru Life"},{sym:"IDEA",name:"Vodafone Idea"},{sym:"IDFCFIRSTB",name:"IDFC First Bank"},{sym:"IEX",name:"IEX"},{sym:"IGL",name:"IGL"},{sym:"INDHOTEL",name:"Indian Hotels"},{sym:"INDIAMART",name:"IndiaMART"},{sym:"INDIGO",name:"IndiGo"},{sym:"INDUSINDBK",name:"IndusInd Bank"},{sym:"INDUSTOWER",name:"Indus Towers"},{sym:"INFY",name:"Infosys"},{sym:"IOC",name:"Indian Oil"},{sym:"IRCTC",name:"IRCTC"},{sym:"IRFC",name:"IRFC"},{sym:"ITC",name:"ITC"},{sym:"JINDALSTEL",name:"Jindal Steel"},{sym:"JKCEMENT",name:"JK Cement"},{sym:"JSL",name:"Jindal Stainless"},{sym:"JSWENERGY",name:"JSW Energy"},{sym:"JSWSTEEL",name:"JSW Steel"},{sym:"JUBLFOOD",name:"Jubilant Food"},{sym:"KAJARIACER",name:"Kajaria"},{sym:"KALYANKJIL",name:"Kalyan Jewellers"},{sym:"KOTAKBANK",name:"Kotak Bank"},{sym:"KPITTECH",name:"KPIT Tech"},{sym:"LT",name:"L&T"},{sym:"LICHSGFIN",name:"LIC Housing"},{sym:"LICI",name:"LIC"},{sym:"LODHA",name:"Lodha"},{sym:"LTIM",name:"LTIMindtree"},{sym:"LTTS",name:"L&T Tech"},{sym:"LUPIN",name:"Lupin"},{sym:"M&M",name:"M&M"},{sym:"M&MFIN",name:"M&M Financial"},{sym:"MARICO",name:"Marico"},{sym:"MARUTI",name:"Maruti"},{sym:"MAXHEALTH",name:"Max Healthcare"},{sym:"MFSL",name:"Max Financial"},{sym:"MPHASIS",name:"Mphasis"},{sym:"MUTHOOTFIN",name:"Muthoot Finance"},{sym:"NATIONALUM",name:"National Aluminium"},{sym:"NAUKRI",name:"Info Edge"},{sym:"NAVINFLUOR",name:"Navin Fluorine"},{sym:"NESTLEIND",name:"Nestle India"},{sym:"NHPC",name:"NHPC"},{sym:"NMDC",name:"NMDC"},{sym:"NTPC",name:"NTPC"},{sym:"OBEROIRLTY",name:"Oberoi Realty"},{sym:"OFSS",name:"Oracle Financial"},{sym:"ONGC",name:"ONGC"},{sym:"PAGEIND",name:"Page Industries"},{sym:"PATANJALI",name:"Patanjali Foods"},{sym:"PAYTM",name:"Paytm"},{sym:"PERSISTENT",name:"Persistent"},{sym:"PFC",name:"PFC"},{sym:"PIIND",name:"PI Industries"},{sym:"PIDILITIND",name:"Pidilite"},{sym:"POLICYBZR",name:"PolicyBazaar"},{sym:"POLYCAB",name:"Polycab"},{sym:"PNB",name:"Punjab National Bank"},{sym:"POONAWALLA",name:"Poonawalla Fincorp"},{sym:"POWERGRID",name:"Power Grid"},{sym:"PRESTIGE",name:"Prestige"},{sym:"RAMCOCEM",name:"Ramco Cements"},{sym:"RECLTD",name:"REC"},{sym:"RELIANCE",name:"Reliance"},{sym:"RVNL",name:"RVNL"},{sym:"SAIL",name:"SAIL"},{sym:"SBICARD",name:"SBI Cards"},{sym:"SBILIFE",name:"SBI Life"},{sym:"SBIN",name:"SBI"},{sym:"SCHAEFFLER",name:"Schaeffler"},{sym:"SHREECEM",name:"Shree Cement"},{sym:"SHRIRAMFIN",name:"Shriram Finance"},{sym:"SIEMENS",name:"Siemens"},{sym:"SJVN",name:"SJVN"},{sym:"SOLARINDS",name:"Solar Industries"},{sym:"SONACOMS",name:"Sona BLW"},{sym:"STARHEALTH",name:"Star Health"},{sym:"SUNPHARMA",name:"Sun Pharma"},{sym:"SUNTV",name:"Sun TV"},{sym:"SUZLON",name:"Suzlon"},{sym:"SWIGGY",name:"Swiggy"},{sym:"TATACHEM",name:"Tata Chemicals"},{sym:"TATACOMM",name:"Tata Comm"},{sym:"TATACONSUM",name:"Tata Consumer"},{sym:"TATAELXSI",name:"Tata Elxsi"},{sym:"TATAMOTORS",name:"Tata Motors"},{sym:"TATAPOWER",name:"Tata Power"},{sym:"TATASTEEL",name:"Tata Steel"},{sym:"TCS",name:"TCS"},{sym:"TECHM",name:"Tech Mahindra"},{sym:"TIINDIA",name:"Tube Investments"},{sym:"TITAN",name:"Titan"},{sym:"TORNTPHARM",name:"Torrent Pharma"},{sym:"TORNTPOWER",name:"Torrent Power"},{sym:"TRENT",name:"Trent"},{sym:"TVSMOTOR",name:"TVS Motor"},{sym:"UBL",name:"United Breweries"},{sym:"ULTRACEMCO",name:"UltraTech"},{sym:"UNIONBANK",name:"Union Bank"},{sym:"UPL",name:"UPL"},{sym:"VBL",name:"Varun Beverages"},{sym:"VEDL",name:"Vedanta"},{sym:"VOLTAS",name:"Voltas"},{sym:"WIPRO",name:"Wipro"},{sym:"YESBANK",name:"Yes Bank"},{sym:"ZOMATO",name:"Zomato"},{sym:"ZYDUSLIFE",name:"Zydus"}
 ];
@@ -282,6 +331,73 @@ function MiniChart(props) {
         <span style={{color:"#34d399"}}>┄ 20D Low</span> &nbsp;
         <span style={{color:"#4ade80"}}>● Buy</span> &nbsp;
         <span style={{color:"#fbbf24"}}>● Target</span>
+      </div>
+    </div>
+  );
+}
+
+function PortfolioView(props) {
+  var stocks = props.stocks;
+  var onSelect = props.onSelect;
+  var stats = calcPortfolioStats(stocks);
+  var C = { card:"#0f1e33", border:"#1e3352", muted:"#64748b", buy:"#4ade80", high:"#f87171", gtt:"#fbbf24", dim:"#4a6fa5", text:"#dce8f8" };
+  var card = function(sx){ return Object.assign({ background:C.card, border:"1px solid " + C.border, borderRadius:10 }, sx || {}); };
+  if (!stats) return <div style={{padding:40,textAlign:"center",color:C.muted}}>कोई स्टॉक नहीं।</div>;
+  var statCards = [
+    { lbl:"Stocks", val: stats.totalStocks, clr:"#93c5fd" },
+    { lbl:"Total Trades", val: stats.totalTrades, clr:C.text },
+    { lbl:"Win Rate", val: stats.winRate.toFixed(1) + "%", clr:C.buy },
+    { lbl:"Profit Factor", val: isFinite(stats.profitFactor) ? stats.profitFactor.toFixed(2) : "∞", clr:C.gtt },
+    { lbl:"Net Return", val: (stats.netPct >= 0 ? "+" : "") + stats.netPct.toFixed(2) + "%", clr: stats.netPct >= 0 ? C.buy : C.high },
+    { lbl:"Expectancy", val: stats.expectancy.toFixed(2) + "%", clr: stats.expectancy >= 0 ? C.buy : C.high },
+    { lbl:"Avg Win", val: "+" + stats.avgWin.toFixed(2) + "%", clr:C.buy },
+    { lbl:"Avg Loss", val: "-" + stats.avgLoss.toFixed(2) + "%", clr:C.high },
+    { lbl:"Avg Hold", val: stats.avgHeldDays.toFixed(1) + "d", clr:C.dim },
+    { lbl:"Holding", val: stats.openCount, clr:C.gtt },
+    { lbl:"GTT Active", val: stats.gttCount, clr:C.gtt },
+    { lbl:"Idle", val: stats.idleCount, clr:C.muted }
+  ];
+  return (
+    <div style={{padding:"0 16px 20px"}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(90px,1fr))",gap:8,marginBottom:14}}>
+        {statCards.map(function(c,i){
+          return <div key={i} style={card({padding:"10px 12px",textAlign:"center"})}>
+            <div style={{fontSize:16,fontWeight:700,color:c.clr,fontFamily:"monospace"}}>{c.val}</div>
+            <div style={{fontSize:10,color:C.muted,marginTop:2}}>{c.lbl}</div>
+          </div>;
+        })}
+      </div>
+      <div style={card({overflow:"hidden"})}>
+        <div style={{padding:"10px 14px",fontSize:12,color:C.muted,borderBottom:"1px solid " + C.border}}>
+          प्रति स्टॉक परफॉर्मेंस — क्लिक करके चार्ट देखें
+        </div>
+        <div style={{overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+            <thead>
+              <tr style={{background:"#0a1626"}}>
+                {["Stock","Trades","Win%","Avg Win","Avg Loss","Net%","Status","Last"].map(function(h){
+                  return <th key={h} style={{padding:"8px",textAlign:"left",color:C.muted,fontWeight:600,borderBottom:"1px solid " + C.border,whiteSpace:"nowrap",fontSize:10}}>{h}</th>;
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {stats.perStock.map(function(p,i){
+                var statusClr = p.status === "HOLDING" ? C.buy : p.status === "GTT" ? C.gtt : C.muted;
+                return <tr key={i} style={{borderBottom:"1px solid #0d1a2a",cursor:onSelect?"pointer":"default"}}
+                  onClick={onSelect ? function(){ onSelect(i); } : null}>
+                  <td style={{padding:"7px 8px",color:"#93c5fd",fontWeight:600,whiteSpace:"nowrap"}}>{p.name}</td>
+                  <td style={{padding:"7px 8px",fontFamily:"monospace"}}>{p.trades}</td>
+                  <td style={{padding:"7px 8px",fontFamily:"monospace",color:p.winRate>=50?C.buy:C.high}}>{p.winRate.toFixed(0)}%</td>
+                  <td style={{padding:"7px 8px",fontFamily:"monospace",color:C.buy}}>+{p.avgWin.toFixed(2)}</td>
+                  <td style={{padding:"7px 8px",fontFamily:"monospace",color:C.high}}>-{p.avgLoss.toFixed(2)}</td>
+                  <td style={{padding:"7px 8px",fontFamily:"monospace",fontWeight:700,color:p.netPct>=0?C.buy:C.high}}>{(p.netPct>=0?"+":"")+p.netPct.toFixed(2)}%</td>
+                  <td style={{padding:"7px 8px",color:statusClr,fontWeight:700,fontSize:10}}>{p.status}</td>
+                  <td style={{padding:"7px 8px",fontFamily:"monospace",color:C.muted}}>{p.lastClose ? "₹" + p.lastClose.toFixed(1) : "—"}</td>
+                </tr>;
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -370,7 +486,8 @@ function App() {
     { key:"chart", lbl:"📊 Chart" },
     { key:"trades", lbl:"💼 Trades" },
     { key:"log", lbl:"📜 Event Log" },
-    { key:"table", lbl:"📋 Table" }
+    { key:"table", lbl:"📋 Table" },
+    { key:"portfolio", lbl:"📊 Portfolio" }
   ];
   var events = s ? s.rows.filter(function(r){ return r.events && r.events.length; }) : [];
 
@@ -534,6 +651,7 @@ function App() {
             </tbody>
           </table>
         </div>}
+        {view === "portfolio" && <PortfolioView stocks={stocks} onSelect={function(i){ setActive(i); setView("chart"); }} />}
       </div>}
       {modal && <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.8)", display:"flex", alignItems:"flex-end", zIndex:100 }}
         onClick={function(e){ if (e.currentTarget === e.target) { setModal(false); setErr(""); } }}>
