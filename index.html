@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>20D Breakout + GTT (Averaging 3-Buy)</title>
+<title>20D Breakout + GTT (A2 Sheet · 3-Buy Avg)</title>
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; background: #080f1a; -webkit-tap-highlight-color: transparent; }
@@ -22,6 +22,7 @@
 const { useState, useEffect } = React;
 
 const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx5mVZIErWjOyKpAkZItpr3X69fgJ2Id0f2wkKLCQcd1pd0sfupIkJ5k3pxsldcx9J-/exec";
+const SHEET_TAB       = "20 DAY TESTING";
 
 const DEFAULT_PERIOD       = 20;
 const DEFAULT_EPS          = 0.03;
@@ -29,8 +30,8 @@ const DEFAULT_FIXED_AMOUNT = 25000;
 const DEFAULT_TARGETS      = [0.20, 0.15, 0.10];
 const MAX_BUYS             = 3;
 const DEFAULT_RANGE        = "2y";
-const SETTINGS_KEY         = "backtest_settings_v4";
-const STOCKS_KEY           = "backtest_stocks_v3";
+const SETTINGS_KEY         = "backtest_settings_v5";
+const STOCKS_KEY           = "backtest_stocks_v4";
 
 const RANGE_OPTIONS = [
   { key:"6mo", label:"6M" }, { key:"1y", label:"1Y" },
@@ -38,13 +39,7 @@ const RANGE_OPTIONS = [
 ];
 
 const FALLBACK_STOCKS = [
-  { sym:"RELIANCE",  name:"Reliance Industries", suitable:true },
-  { sym:"TCS",       name:"Tata Consultancy Services", suitable:true },
-  { sym:"HDFCBANK",  name:"HDFC Bank", suitable:true },
-  { sym:"INFY",      name:"Infosys", suitable:true },
-  { sym:"ICICIBANK", name:"ICICI Bank", suitable:true },
-  { sym:"SBIN",      name:"State Bank of India", suitable:true },
-  { sym:"ITC",       name:"ITC", suitable:true },
+  { sym:"RELIANCE", name:"Reliance Industries", suitable:true },
 ];
 
 /* ---------- formatters ---------- */
@@ -123,45 +118,67 @@ async function fetchFromYahoo(sym, range) {
   return { csv: lines.join("\n"), name: "NSE:" + clean, rows: lines.length - 1 };
 }
 
+/* ================================================================
+   FETCH FROM APPS SCRIPT — A2 cell से single stock
+   Supports: string, {a2}, {symbol}, {values:[[...]]}, {stocks:[..]}, [..]
+   ================================================================ */
 async function fetchSheetStocks() {
-  if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf("PASTE_") === 0) throw new Error("Apps Script URL set नहीं किया");
-  const res = await fetch(APPS_SCRIPT_URL);
+  if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf("PASTE_") === 0) {
+    throw new Error("Apps Script URL set नहीं किया");
+  }
+  const sep = APPS_SCRIPT_URL.indexOf("?") >= 0 ? "&" : "?";
+  const url = APPS_SCRIPT_URL + sep + "tab=" + encodeURIComponent(SHEET_TAB);
+  const res = await fetch(url);
   if (!res.ok) throw new Error("Apps Script HTTP " + res.status);
   const json = await res.json();
-  if (json.error) throw new Error(json.error);
-  const headers = json.headers || [];
-  const rows = json.stocks || [];
-  if (!rows.length) throw new Error("Sheet में कोई data नहीं मिला");
-  const findCol = function(){
-    const names = Array.prototype.slice.call(arguments);
-    for (let i=0;i<names.length;i++) {
-      const k = headers.find(function(h){ return String(h).toLowerCase().replace(/\s+/g,"") === names[i].toLowerCase().replace(/\s+/g,""); });
-      if (k) return k;
-    }
-    for (let i=0;i<names.length;i++) {
-      const k = headers.find(function(h){ return String(h).toLowerCase().includes(names[i].toLowerCase()); });
-      if (k) return k;
-    }
-    return null;
-  };
-  const symCol  = findCol("symbol","sym","ticker","stock","scrip","nsecode");
-  const nameCol = findCol("name","company","stockname","description");
-  const bohCol  = findCol("boh","suitable","status","result","verdict","selection","filter");
-  if (!symCol) throw new Error('"Symbol" column नहीं मिला। मिले: ' + headers.join(", "));
-  const stocks = rows
-    .map(function(r){
-      const raw = String(r[symCol] || "").trim().toUpperCase().replace(/\.NS$|^NSE:/i, "");
-      let suitable = true, bohText = "";
-      if (bohCol) {
-        const bv = String(r[bohCol] || "").trim();
-        bohText = bv;
-        suitable = !(/^(a|avoid|no|n|fail|false|0|✗|x)$/i.test(bv));
+  if (json && json.error) throw new Error(json.error);
+
+  let raw = "";
+  let name = "";
+  let bohText = "";
+  let suitable = true;
+
+  if (typeof json === "string") {
+    raw = json;
+  } else if (json && json.a2 != null) {
+    raw = json.a2;
+  } else if (json && json.symbol != null) {
+    raw = json.symbol;
+  } else if (json && Array.isArray(json.values) && json.values.length >= 1) {
+    const a2row = json.values[1] || json.values[0];
+    raw = a2row && a2row[0];
+  } else if (json && Array.isArray(json.stocks) && json.stocks.length) {
+    const first = json.stocks[0];
+    if (first && typeof first === "object") {
+      const keys = Object.keys(first);
+      const sk = keys.find(function(k){ return /symbol|sym|ticker|stock|scrip/i.test(k); }) || keys[0];
+      raw = first[sk];
+      const nk = keys.find(function(k){ return /name|company/i.test(k); });
+      if (nk) name = String(first[nk] || "").trim();
+      const bk = keys.find(function(k){ return /boh|suitable|status/i.test(k); });
+      if (bk) {
+        bohText = String(first[bk] || "").trim();
+        suitable = !(/^(a|avoid|no|n|fail|false|0|✗|x)$/i.test(bohText));
       }
-      return { sym: raw, name: String(r[nameCol] || r[symCol] || "").trim(), suitable: suitable, bohText: bohText };
-    })
-    .filter(function(s){ return s.sym && /^[A-Z0-9&\-]+$/.test(s.sym); });
-  if (!stocks.length) throw new Error("Sheet में valid symbol नहीं मिला");
-  return { stocks: stocks, cols: headers, totalRows: rows.length, hasBoh: !!bohCol };
+    } else {
+      raw = first;
+    }
+  } else if (json && Array.isArray(json) && json.length) {
+    raw = json[0];
+  }
+
+  const sym = String(raw || "").trim().toUpperCase().replace(/\.NS$|^NSE:/i, "");
+  if (!sym || !/^[A-Z0-9&\-]+$/.test(sym)) {
+    throw new Error('A2 में valid stock symbol नहीं मिला (मिला: "' + String(raw) + '")');
+  }
+  if (!name) name = sym;
+
+  return {
+    stocks: [{ sym: sym, name: name, suitable: suitable, bohText: bohText }],
+    cols: ["Symbol"],
+    totalRows: 1,
+    hasBoh: !!bohText,
+  };
 }
 
 function parseCSV(raw, minPeriod) {
@@ -208,13 +225,6 @@ function parseCSV(raw, minPeriod) {
 
 /* ================================================================
    CORE STRATEGY — 20D Breakout + GTT + 3-BUY AVERAGING
-   Rule 1: Today Low = 20D Low → GTT signal
-   Rule 2: GTT @ 20D High
-   Rule 3: GTT daily trailing down
-   Rule 5: 1st Buy target 20%
-   Rule 6: 2nd Buy target 15%
-   Rule 7: 3rd Buy target 10%
-   Rule 9: Fixed ₹ amount per buy
    ================================================================ */
 function calcSignals(rows, period, eps, fixedAmount, targetSteps) {
   period = period || DEFAULT_PERIOD;
@@ -233,7 +243,7 @@ function calcSignals(rows, period, eps, fixedAmount, targetSteps) {
     if (enriched[i-1].d20H != null) enriched[i].prevD20H = enriched[i-1].d20H;
   }
 
-  let buys = [];               // [{ date, price, qty, buyIdx }]
+  let buys = [];
   let totalShares = 0;
   let totalCost = 0;
   let avgPrice = 0;
@@ -294,18 +304,16 @@ function calcSignals(rows, period, eps, fixedAmount, targetSteps) {
         r.buyIdx = buyIdx;
         r.position = { avgPrice: avgPrice, target: targetPrice, shares: totalShares, buys: buys.length, targetPct: currentTargetPct };
 
-        // Same-day target check
         if (r.high >= targetPrice - eps) {
           doExit(r);
         }
         continue;
       }
-      // GTT trailing (display only; next day's trigger uses r.d20H via prevD20H)
       r.gttPrice = r.d20H;
       continue;
     }
 
-    // 3. newLow → place GTT (fresh entry OR averaging)
+    // 3. newLow → GTT place
     if (r.newLow && buys.length < MAX_BUYS) {
       gttActive = true;
       r.events.push("gtt-placed");
@@ -313,7 +321,7 @@ function calcSignals(rows, period, eps, fixedAmount, targetSteps) {
       continue;
     }
 
-    // 4. holding, no new action — record position for display
+    // 4. Holding — record for display
     if (totalShares > 0) {
       r.position = { avgPrice: avgPrice, target: targetPrice, shares: totalShares, buys: buys.length, targetPct: currentTargetPct };
     }
@@ -434,7 +442,7 @@ function calcScreenerRow(stock) {
     if (buyEv) {
       var ago = rows.length - 1 - i;
       if (ago <= 1) {
-        status = "BUY_TODAY"; label = "✅ " + (buyEv==="buy"?"BUY":"BUY" + buyEv.slice(3)); priority = 0;
+        status = "BUY_TODAY"; label = "✅ " + (buyEv==="buy"?"BUY":("BUY" + buyEv.slice(3))); priority = 0;
         detail = buyEv + " @ ₹" + fmtN(r.buyPrice) + " × " + r.buyQty + " (" + (ago === 0 ? "आज" : "कल") + ")";
       }
       break;
@@ -644,17 +652,17 @@ function PortfolioView(props) {
   if (!stats) return <div style={{padding:40,textAlign:"center",color:C.muted}}>कोई स्टॉक नहीं।</div>;
   var statCards=[
     {lbl:"Stocks",val:stats.totalStocks,clr:"#93c5fd"},
-    {lbl:"Total Trades",val:stats.totalTrades,clr:C.text},
+    {lbl:"Trades",val:stats.totalTrades,clr:C.text},
     {lbl:"Win Rate",val:stats.winRate.toFixed(1)+"%",clr:C.buy},
     {lbl:"Profit Factor",val:isFinite(stats.profitFactor)?stats.profitFactor.toFixed(2):"∞",clr:C.gtt},
     {lbl:"Net Return",val:(stats.netPct>=0?"+":"")+stats.netPct.toFixed(2)+"%",clr:stats.netPct>=0?C.buy:C.high},
     {lbl:"Invested ₹",val:fmtRs(stats.totalInvestedRs),clr:"#93c5fd"},
     {lbl:"Total P&L ₹",val:(stats.totalProfitRs>=0?"+":"")+fmtRs(stats.totalProfitRs).replace("-",""),clr:stats.totalProfitRs>=0?C.buy:C.high},
-    {lbl:"Returned ₹",val:fmtRs(stats.totalReturnedRs),clr:C.text},
     {lbl:"Peak Equity",val:equity?(equity.peakEquity>=0?"+":"")+fmtRs(equity.peakEquity).replace("-",""):"—",clr:"#4ade80"},
     {lbl:"Max DD",val:equity?"-"+fmtRs(equity.maxDrawdown):"—",clr:C.high},
     {lbl:"Holding",val:stats.openCount,clr:C.gtt},
-    {lbl:"GTT",val:stats.gttCount,clr:C.gtt}
+    {lbl:"GTT",val:stats.gttCount,clr:C.gtt},
+    {lbl:"Idle",val:stats.idleCount,clr:C.muted}
   ];
   return (
     <div style={{padding:"0 16px 20px"}}>
@@ -663,7 +671,7 @@ function PortfolioView(props) {
         <ExportBtn label="📥 All Trades" onClick={function(){ exportAllTrades(stocks); }}/>
       </div>
       <div style={card({padding:"10px 0",marginBottom:14})}>
-        <div style={{paddingLeft:14,paddingRight:14,fontSize:12,color:C.muted,marginBottom:6}}>📈 Equity Curve — Cumulative P&L (₹)</div>
+        <div style={{paddingLeft:14,paddingRight:14,fontSize:12,color:C.muted,marginBottom:6}}>📈 Equity Curve</div>
         <EquityCurveChart data={equity}/>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(95px,1fr))",gap:8,marginBottom:14}}>
@@ -675,7 +683,7 @@ function PortfolioView(props) {
         })}
       </div>
       <div style={card({overflow:"hidden"})}>
-        <div style={{padding:"10px 14px",fontSize:12,color:C.muted,borderBottom:"1px solid "+C.border}}>प्रति स्टॉक — क्लिक करें</div>
+        <div style={{padding:"10px 14px",fontSize:12,color:C.muted,borderBottom:"1px solid "+C.border}}>प्रति स्टॉक</div>
         <div style={{overflowX:"auto"}}>
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
             <thead><tr style={{background:"#0a1626"}}>
@@ -755,7 +763,7 @@ function ScreenerView(props) {
             fontWeight:filter===f.key?700:400,whiteSpace:"nowrap"}}>{f.lbl} <span style={{opacity:0.8}}>({f.count})</span></button>;
         })}
       </div>
-      <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}><ExportBtn label="📥 Export Screener CSV" onClick={exportScreener}/></div>
+      <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}><ExportBtn label="📥 Export Screener" onClick={exportScreener}/></div>
       {filtered.length===0 && <div style={{...card({padding:30}),textAlign:"center",color:C.muted}}>कोई स्टॉक नहीं।</div>}
       {filtered.length>0 && <div style={card({overflow:"hidden"})}>
         <div style={{overflowX:"auto"}}>
@@ -802,8 +810,7 @@ function ScreenerView(props) {
 function exportTrades(stock){
   if (!stock) return;
   var rows=[["Stock","Buy#","Entry Date","Entry Price","Qty","Invested ₹","Target%","Exit Date","Exit Price","Shares","Proceeds ₹","Profit ₹","Days","Buys"]];
-  (stock.trades||[]).forEach(function(t,i){
-    // one row per buy leg + summary
+  (stock.trades||[]).forEach(function(t){
     t.buys.forEach(function(b, bi){
       rows.push([stock.name, "B"+(bi+1), fmtDISODate(b.date), b.price.toFixed(2), b.qty, (b.price*b.qty).toFixed(0),
         ((t.targetPct||0)*100).toFixed(0),
@@ -891,25 +898,24 @@ function SettingsModal(props){
       onClick={function(e){ if (e.currentTarget===e.target) props.onClose(); }}>
       <div style={{background:"#0d1a2a",border:"1px solid "+C.border,borderRadius:14,padding:22,width:"100%",maxWidth:460,maxHeight:"92vh",overflowY:"auto"}}>
         <div style={{fontWeight:700,fontSize:17,marginBottom:6,color:"#c4b5fd"}}>⚙️ Strategy Settings</div>
-        <div style={{fontSize:11,color:C.muted,marginBottom:16,lineHeight:1.6}}>Rules: 20D Low → GTT @ 20D High · Targets 20/15/10% · Fixed ₹ per buy · Max 3 buys</div>
+        <div style={{fontSize:11,color:C.muted,marginBottom:16,lineHeight:1.6}}>20D Low → GTT @ 20D High · Targets 20/15/10% · Fixed ₹ per buy · Max 3 buys</div>
 
         <label style={{fontSize:12,color:C.muted,display:"block",marginBottom:4}}>📅 Period (days)</label>
         <input type="number" min="3" max="500" value={pv} onChange={function(e){ setPv(e.target.value); }} style={Object.assign({},inputStyle,{marginBottom:10})}/>
         <label style={{fontSize:12,color:C.muted,display:"block",marginBottom:4}}>📏 EPS Tolerance</label>
         <input type="number" step="0.01" min="0" max="10" value={ev} onChange={function(e){ setEv(e.target.value); }} style={Object.assign({},inputStyle,{marginBottom:10})}/>
-        <label style={{fontSize:12,color:C.muted,display:"block",marginBottom:4}}>💰 Fixed ₹ Per Buy (Rule 9)</label>
+        <label style={{fontSize:12,color:C.muted,display:"block",marginBottom:4}}>💰 Fixed ₹ Per Buy</label>
         <input type="number" step="1000" min="1000" value={av} onChange={function(e){ setAv(e.target.value); }} style={Object.assign({},inputStyle,{marginBottom:4})}/>
-        <div style={{fontSize:10,color:C.muted,marginBottom:12}}>Max exposure per stock = ₹{inr((parseFloat(av)||0)*3)} (3 buys × ₹{inr(parseFloat(av)||0)})</div>
+        <div style={{fontSize:10,color:C.muted,marginBottom:12}}>Max exposure = ₹{inr((parseFloat(av)||0)*3)}</div>
 
-        <label style={{fontSize:12,color:C.muted,display:"block",marginBottom:4}}>🎯 Target % — Buy 1 / 2 / 3 (Rules 5,6,7)</label>
-        <div style={{display:"flex", gap:8, marginBottom:12}}>
+        <label style={{fontSize:12,color:C.muted,display:"block",marginBottom:4}}>🎯 Target % — B1 / B2 / B3</label>
+        <div style={{display:"flex", gap:8, marginBottom:14}}>
           {tv.map(function(v,i){
             return <input key={i} type="number" step="0.5" min="0.1" value={v}
               onChange={function(e){ var copy=tv.slice(); copy[i]=e.target.value; setTv(copy); }}
               style={Object.assign({},inputStyle,{flex:1,padding:"8px 6px",textAlign:"center",fontSize:13})}/>;
           })}
         </div>
-        <div style={{fontSize:10,color:C.muted,marginTop:-8,marginBottom:14}}>Default: 20 / 15 / 10</div>
 
         {err && <div style={{color:"#f87171",background:"rgba(239,68,68,.1)",border:"1px solid rgba(239,68,68,.3)",borderRadius:8,padding:"8px 12px",fontSize:12,marginBottom:12}}>{err}</div>}
         <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
@@ -922,79 +928,53 @@ function SettingsModal(props){
   );
 }
 
-function StocksListModal({ onClose, onPick, loadingSym, loadAll, autoProgress, stockList, sheetInfo, reloadSheet, period, targetSteps, fixedAmount, hasBohCol }) {
-  const [q, setQ] = useState("");
-  const [filter, setFilter] = useState("all");
-  const filtered = stockList.filter(s => {
-    if (filter === "S" && !s.suitable) return false;
-    if (filter === "A" && s.suitable) return false;
-    if (!q) return true;
-    const ql = q.toLowerCase();
-    return s.sym.toLowerCase().includes(ql) || (s.name||"").toLowerCase().includes(ql);
-  });
-  const sCount = stockList.filter(s=>s.suitable).length;
-  const aCount = stockList.filter(s=>!s.suitable).length;
-  const C = { bg:"#080f1a", card:"#0f1e33", border:"#1e3352", accent:"#2563eb", muted:"#64748b", text:"#dce8f8", suit:"#4ade80", avoid:"#f87171" };
+function SheetStockModal({ onClose, onLoad, stockList, sheetInfo, reloadSheet, period, targetSteps, fixedAmount }) {
+  const C = { bg:"#080f1a", card:"#0f1e33", border:"#1e3352", accent:"#2563eb", muted:"#64748b", text:"#dce8f8", suit:"#4ade80" };
+  const first = stockList[0];
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",display:"flex",alignItems:"flex-end",zIndex:200}}
       onClick={e=>e.currentTarget===e.target && onClose()}>
       <div style={{background:"#0d1a2a",borderTop:`1px solid ${C.border}`,borderRadius:"18px 18px 0 0",padding:16,width:"100%",maxHeight:"92vh",display:"flex",flexDirection:"column"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-          <div style={{minWidth:0}}>
-            <div style={{fontWeight:700,fontSize:16}}>📋 Final List (from Sheet)</div>
-            <div style={{fontSize:11,color:C.muted,marginTop:2}}>
-              {stockList.length} stocks
-              {hasBohCol && <> · <span style={{color:C.suit}}>{sCount} ✓</span> · <span style={{color:C.avoid}}>{aCount} ✗</span></>}
-            </div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <div>
+            <div style={{fontWeight:700,fontSize:16}}>📋 Sheet Stock (A2)</div>
+            <div style={{fontSize:11,color:C.muted,marginTop:2}}>Tab: <b style={{color:"#93c5fd"}}>20 DAY TESTING</b></div>
             <div style={{fontSize:10,color:C.muted,marginTop:2}}>
               {period}D · GTT @ 20D High · Targets {targetSteps.map(function(x){ return (x*100).toFixed(0); }).join("/")}% · ₹{inr(fixedAmount)}/buy · Max 3
             </div>
           </div>
           <button onClick={onClose} style={{background:"none",border:"none",color:C.muted,fontSize:22,cursor:"pointer"}}>×</button>
         </div>
-        <div style={{display:"flex",gap:6,marginBottom:10}}>
+
+        <div style={{display:"flex",gap:6,marginBottom:12}}>
           <button onClick={reloadSheet} disabled={!!sheetInfo?.loading}
-            style={{flex:1,background: sheetInfo?.loading ? "#1e3352" : "#1e3a5f",color:"#93c5fd",border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px",fontSize:12,fontWeight:600,cursor: sheetInfo?.loading ? "wait" : "pointer"}}>
+            style={{flex:1,background: sheetInfo?.loading ? "#1e3352" : "#1e3a5f",color:"#93c5fd",border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 12px",fontSize:12,fontWeight:600,cursor: sheetInfo?.loading ? "wait" : "pointer"}}>
             {sheetInfo?.loading ? "⟳ Loading..." : "🔄 Reload Sheet"}
           </button>
-          <button onClick={loadAll} disabled={!!autoProgress}
-            style={{flex:2,background: autoProgress ? "#1e3352" : "linear-gradient(135deg,#2563eb,#7c3aed)",color:"#fff",border:"none",borderRadius:8,padding:"8px 14px",fontSize:12,fontWeight:700,cursor: autoProgress ? "wait" : "pointer"}}>
-            {autoProgress ? `⏳ ${autoProgress.done}/${autoProgress.total} — ${autoProgress.current}...` : `🚀 Load all ${stockList.length}`}
+          <button onClick={()=>onLoad(first)} disabled={!first || !!sheetInfo?.loading}
+            style={{flex:2,background:"linear-gradient(135deg,#2563eb,#7c3aed)",color:"#fff",border:"none",borderRadius:8,padding:"10px 14px",fontSize:13,fontWeight:700,cursor: (!first||sheetInfo?.loading) ? "not-allowed" : "pointer",opacity: (!first||sheetInfo?.loading) ? 0.5 : 1}}>
+            🚀 Load {first ? first.sym : "—"}
           </button>
         </div>
-        <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search symbol / name..."
-          style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 12px",color:C.text,fontSize:14,boxSizing:"border-box",outline:"none",marginBottom:8}}/>
-        {hasBohCol && (
-          <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
-            {[["all","All",stockList.length],["S","✅ Suitable",sCount],["A","⛔ Avoid",aCount]].map(([k,l,n])=>(
-              <button key={k} onClick={()=>setFilter(k)} style={{background: filter===k ? C.accent : "none",color: filter===k ? "#fff" : C.muted,border:`1px solid ${filter===k ? C.accent : C.border}`,borderRadius:8,padding:"5px 12px",fontSize:12,cursor:"pointer",fontWeight: filter===k?700:400}}>{l} ({n})</button>
-            ))}
+
+        {sheetInfo?.error && <div style={{background:"rgba(239,68,68,.12)",border:"1px solid #7f1d1d",color:"#fca5a5",borderRadius:10,padding:"10px 12px",fontSize:12,marginBottom:12}}>
+          ⚠ {sheetInfo.error}
+        </div>}
+
+        {first ? (
+          <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"14px 16px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+              <span style={{color:"#93c5fd",fontWeight:700,fontSize:16,fontFamily:"monospace"}}>{first.sym}</span>
+              {first.bohText && <span style={{background:"rgba(74,222,128,.12)",color:C.suit,border:"1px solid #166534",borderRadius:20,padding:"1px 10px",fontSize:10,fontWeight:700}}>{first.bohText}</span>}
+            </div>
+            <div style={{fontSize:12,color:C.muted}}>{first.name}</div>
+            <div style={{fontSize:10,color:C.muted,marginTop:8}}>Source: Apps Script · Cell A2 · Tab "20 DAY TESTING"</div>
+          </div>
+        ) : (
+          <div style={{textAlign:"center",color:C.muted,padding:40,fontSize:12}}>
+            {sheetInfo?.loading ? "Sheet load हो रही है..." : "A2 में कोई stock नहीं मिला।"}
           </div>
         )}
-        <div style={{overflowY:"auto",flex:1,margin:"0 -8px",padding:"0 8px"}}>
-          {filtered.length===0 && <div style={{textAlign:"center",color:C.muted,padding:40}}>कोई stock नहीं।</div>}
-          {filtered.map(s => {
-            const isLoading = loadingSym === s.sym;
-            const badge = hasBohCol
-              ? (s.suitable ? { txt: s.bohText || "Suitable", c:C.suit, bg:"rgba(74,222,128,.12)", bd:"#166534" }
-                            : { txt: s.bohText || "Avoid", c:C.avoid, bg:"rgba(248,113,113,.12)", bd:"#7f1d1d" })
-              : null;
-            return (
-              <div key={s.sym} onClick={()=>!isLoading && !autoProgress && onPick(s)}
-                style={{background:C.card,border:`1px solid ${isLoading ? C.accent : C.border}`,borderRadius:10,padding:"10px 12px",marginBottom:8,cursor:(isLoading||autoProgress)?"wait":"pointer",display:"flex",alignItems:"center",gap:10,opacity: autoProgress && !isLoading ? 0.5 : 1}}>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
-                    <span style={{color:"#93c5fd",fontWeight:700,fontSize:13,fontFamily:"monospace"}}>{s.sym}</span>
-                    {badge && <span style={{background:badge.bg,color:badge.c,border:`1px solid ${badge.bd}`,borderRadius:20,padding:"1px 8px",fontSize:10,fontWeight:700}}>{badge.txt}</span>}
-                    {isLoading && <span className="spin" style={{color:C.accent}}>⟳</span>}
-                  </div>
-                  <div style={{fontSize:11,color:C.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.name}</div>
-                </div>
-                <div style={{color:"#334a6a",fontSize:18}}>{isLoading?"⟳":"›"}</div>
-              </div>
-            );
-          })}
-        </div>
       </div>
     </div>
   );
@@ -1013,14 +993,9 @@ function App() {
   const [label, setLabel] = useState("");
   const [err, setErr] = useState("");
   const [loadingSym, setLoadingSym] = useState(null);
-  const [autoProgress, setAutoProgress] = useState(null);
   const [toast, setToast] = useState(null);
   const [view, setView] = useState("chart");
   const [chartType, setChartType] = useState("candle");
-  const [bulkModal, setBulkModal] = useState(false);
-  const [bulkTxt, setBulkTxt] = useState("");
-  const [bulkProg, setBulkProg] = useState({current:0,total:0,msg:""});
-  const [bulkErrors, setBulkErrors] = useState([]);
 
   const initSettings = (function(){
     try {
@@ -1065,10 +1040,10 @@ function App() {
       const r = await fetchSheetStocks();
       setStockList(r.stocks);
       setSheetInfo({ loading:false, error:null, source:"sheet", hasBoh:r.hasBoh });
-      showToast("✅ Sheet loaded: " + r.stocks.length + " stocks", "success");
+      showToast("✅ Sheet A2 → " + (r.stocks[0] ? r.stocks[0].sym : "—"), "success");
     } catch (e) {
       console.error("Sheet fetch failed:", e);
-      setStockList(FALLBACK_STOCKS.map(function(s){ return Object.assign({}, s, { bohText:"" }); }));
+      setStockList(FALLBACK_STOCKS.slice());
       setSheetInfo({ loading:false, error:e.message, source:"fallback", hasBoh:false });
       showToast("⚠ Sheet fail: " + e.message, "error");
     }
@@ -1108,84 +1083,6 @@ function App() {
     }
   }
   async function pickFromList(stock){ const ok = await addStockAuto(stock); if (ok) setListOpen(false); }
-
-  async function loadAllFromSheet(){
-    const list = stockList;
-    if (!list.length) { showToast("Sheet खाली है", "error"); return; }
-    setAutoProgress({ done:0, total:list.length, current:"Starting..." });
-    const allData = [];
-    const BATCH_SIZE = 5;
-    for (let i = 0; i < list.length; i += BATCH_SIZE) {
-      const batch = list.slice(i, i + BATCH_SIZE);
-      setAutoProgress({ done:i, total:list.length, current: batch.map(function(b){ return b.sym; }).join(", ") });
-      const promises = batch.map(async function(st){
-        try {
-          const r = await fetchFromYahoo(st.sym, range);
-          const parsed = parseCSV(r.csv, period);
-          if (parsed.error) return null;
-          return { sym: st.sym, name: st.name, suitable: st.suitable !== false, rawRows: parsed.rows };
-        } catch (e) { return null; }
-      });
-      const results = await Promise.all(promises);
-      results.forEach(function(r){ if (r) allData.push(r); });
-      if (i + BATCH_SIZE < list.length) await new Promise(function(r){ setTimeout(r, 250); });
-    }
-    const newStocks = allData.map(function(d){
-      const res = calcSignals(d.rawRows, period, eps, fixedAmount, targetSteps);
-      return {
-        name: "NSE:" + d.sym, amount: fixedAmount, rawRows: d.rawRows,
-        rows: res.rows, trades: res.trades,
-        openPosition: res.openPosition, pendingGtt: res.pendingGtt,
-        sheetSuitable: d.suitable
-      };
-    });
-    setStocks(function(prev){
-      const merged = prev.slice();
-      newStocks.forEach(function(ns){
-        const idx = merged.findIndex(function(x){ return x.name === ns.name; });
-        if (idx >= 0) merged[idx] = Object.assign({}, merged[idx], ns, { amount: merged[idx].amount });
-        else merged.push(ns);
-      });
-      persistStocks(merged);
-      return merged;
-    });
-    setAutoProgress(null);
-    showToast("🚀 " + newStocks.length + "/" + list.length + " stocks loaded", "success");
-    setListOpen(false);
-    setActive(0);
-  }
-
-  async function bulkLoad(){
-    var symbols = bulkTxt.split(/[\n,\s]+/).map(function(s){ return s.trim().toUpperCase().replace(/^NSE:/, ""); }).filter(Boolean);
-    var unique = []; for (var i=0;i<symbols.length;i++) if (unique.indexOf(symbols[i])===-1) unique.push(symbols[i]);
-    if (!unique.length) return;
-    setBulkErrors([]);
-    setBulkProg({current:0,total:unique.length,msg:"शुरू हो रहा है..."});
-    var errs = [];
-    for (var i2=0;i2<unique.length;i2++){
-      var sym=unique[i2];
-      setBulkProg({current:i2+1,total:unique.length,msg:sym+" fetch कर रहे हैं..."});
-      try {
-        var r = await fetchFromYahoo(sym, range);
-        var parsed = parseCSV(r.csv, period);
-        if (parsed.error) { errs.push(sym+": "+parsed.error); continue; }
-        var res = calcSignals(parsed.rows, period, eps, fixedAmount, targetSteps);
-        setStocks(function(p){
-          var name="NSE:"+sym;
-          var idx=p.findIndex(function(x){ return x.name===name; });
-          var newStock={ name:name, amount: idx>=0?p[idx].amount:fixedAmount, rawRows:parsed.rows,
-            rows:res.rows, trades:res.trades, openPosition:res.openPosition, pendingGtt:res.pendingGtt };
-          var next = idx>=0 ? p.map(function(x,j){ return j===idx ? newStock : x; }) : p.concat([newStock]);
-          persistStocks(next);
-          return next;
-        });
-      } catch (e) { errs.push(sym+": "+e.message); }
-      await new Promise(function(r){ setTimeout(r, 350); });
-    }
-    setBulkProg({current:unique.length,total:unique.length,msg:"पूरा हुआ ✅"});
-    setBulkErrors(errs);
-    setTimeout(function(){ setBulkProg({current:0,total:0,msg:""}); setBulkModal(false); setBulkTxt(""); }, 1500);
-  }
 
   function handleAdd(csvRaw, lbl){
     setErr("");
@@ -1294,7 +1191,7 @@ function App() {
             color: sheetInfo.source==="sheet" ? C.buy : "#f87171",
             border: "1px solid " + (sheetInfo.source==="sheet" ? "#166534" : "#7f1d1d")
           }}>
-            {sheetInfo.loading ? "⟳ Loading..." : sheetInfo.source==="sheet" ? ("✓ Sheet ("+stockList.length+")") : ("⚠ Fallback ("+stockList.length+")")}
+            {sheetInfo.loading ? "⟳ Loading..." : sheetInfo.source==="sheet" ? ("✓ A2: "+(stockList[0]?stockList[0].sym:"—")) : "⚠ Fallback"}
           </span>
           {!isDefault && <span style={{ fontSize:10, color:"#c4b5fd", marginLeft:6, background:"#2e1065", border:"1px solid #7c3aed", borderRadius:10, padding:"2px 8px", fontWeight:700 }}>CUSTOM</span>}
         </div>
@@ -1304,10 +1201,8 @@ function App() {
         </select>
         <button onClick={function(){ setListOpen(true); }}
           style={{ background:"none", color:"#93c5fd", border:"1px solid "+C.border, borderRadius:8, padding:"6px 12px", fontSize:12, fontWeight:600, cursor:"pointer" }}>
-          📋 Stocks ({stockList.length})
+          📋 Sheet Stock
         </button>
-        <button onClick={function(){ setBulkModal(true); }}
-          style={{ background:"#7c3aed", color:"#fff", border:"none", borderRadius:8, padding:"6px 12px", fontSize:12, fontWeight:600, cursor:"pointer" }}>⚡ Bulk</button>
         <button onClick={function(){ setModal(true); }}
           style={{ background:C.accent, color:"#fff", border:"none", borderRadius:8, padding:"6px 12px", fontSize:12, fontWeight:600, cursor:"pointer" }}>+ CSV</button>
         <button onClick={function(){ setSettingsOpen(true); }}
@@ -1315,14 +1210,7 @@ function App() {
       </div>
 
       {sheetInfo.error && <div style={{ background:"#7f1d1d", color:"#fecaca", padding:"8px 16px", fontSize:12, borderBottom:"1px solid #991b1b" }}>
-        ⚠ Sheet fetch fail: <b>{sheetInfo.error}</b> — Fallback list use हो रही है।
-      </div>}
-
-      {autoProgress && <div style={{ background:"#1e3352", padding:"8px 16px", fontSize:12, color:"#93c5fd", borderBottom:"1px solid "+C.border }}>
-        ⏳ {autoProgress.done}/{autoProgress.total} — {autoProgress.current}
-        <div style={{ background:"#0d1a2a", height:4, borderRadius:2, marginTop:6, overflow:"hidden" }}>
-          <div style={{ background:C.accent, height:"100%", width:(autoProgress.done/autoProgress.total*100)+"%", transition:"width 0.3s" }}/>
-        </div>
+        ⚠ Sheet fail: <b>{sheetInfo.error}</b>
       </div>}
 
       {stocks.length>0 && <div style={{ display:"flex", overflowX:"auto", background:C.card, borderBottom:"1px solid "+C.border, padding:"0 8px" }}>
@@ -1338,32 +1226,30 @@ function App() {
         {stocks.length>1 && <button onClick={clearAll} style={{ marginLeft:"auto", background:"none", color:"#f87171", border:"none", padding:"9px 12px", fontSize:11, cursor:"pointer", whiteSpace:"nowrap" }}>🗑 Clear all</button>}
       </div>}
 
-      {!s && !autoProgress && <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:18, padding:48, minHeight:"55vh", textAlign:"center" }}>
+      {!s && <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:18, padding:48, minHeight:"55vh", textAlign:"center" }}>
         <div style={{ fontSize:52 }}>📊</div>
         <div>
           <div style={{ fontWeight:700, fontSize:20, marginBottom:6 }}>{period}D Breakout + GTT (3-Buy Avg)</div>
           <div style={{ color:C.muted, fontSize:13 }}>
-            {sheetInfo.loading ? "Sheet load हो रही है..." :
-             sheetInfo.source==="sheet" ? ("✓ Apps Script से "+stockList.length+" stocks मिले") :
-             ("⚠ Fallback list ("+stockList.length+" stocks)")}
+            {sheetInfo.loading ? "Sheet A2 load हो रहा है..." :
+             sheetInfo.source==="sheet" ? ("✓ Sheet A2 → " + (stockList[0]?stockList[0].sym:"—")) :
+             ("⚠ " + (sheetInfo.error || "Fallback"))}
           </div>
         </div>
         <div style={{ display:"flex", gap:10, flexWrap:"wrap", justifyContent:"center" }}>
           <button onClick={function(){ setListOpen(true); }} disabled={sheetInfo.loading}
-            style={{ background:"linear-gradient(135deg,#2563eb,#7c3aed)", color:"#fff", border:"none", borderRadius:10, padding:"13px 26px", fontSize:15, fontWeight:700, cursor: sheetInfo.loading ? "wait" : "pointer" }}>📋 Final List</button>
-          <button onClick={loadAllFromSheet} disabled={sheetInfo.loading}
-            style={{ background:"none", color:"#93c5fd", border:"1px solid "+C.border, borderRadius:10, padding:"13px 26px", fontSize:15, fontWeight:700, cursor: sheetInfo.loading ? "wait" : "pointer" }}>🚀 Load All</button>
-          <button onClick={function(){ setBulkModal(true); }}
-            style={{ background:"#7c3aed", color:"#fff", border:"none", borderRadius:10, padding:"13px 26px", fontSize:15, fontWeight:700, cursor:"pointer" }}>⚡ Bulk Add</button>
+            style={{ background:"linear-gradient(135deg,#2563eb,#7c3aed)", color:"#fff", border:"none", borderRadius:10, padding:"13px 26px", fontSize:15, fontWeight:700, cursor: sheetInfo.loading ? "wait" : "pointer" }}>📋 Sheet Stock खोलें</button>
+          <button onClick={function(){ if (stockList[0]) pickFromList(stockList[0]); }} disabled={sheetInfo.loading || !stockList[0]}
+            style={{ background:"none", color:"#93c5fd", border:"1px solid "+C.border, borderRadius:10, padding:"13px 26px", fontSize:15, fontWeight:700, cursor: (sheetInfo.loading||!stockList[0]) ? "wait" : "pointer" }}>🚀 Load A2 Stock</button>
           <button onClick={function(){ setModal(true); }}
-            style={{ background:C.accent, color:"#fff", border:"none", borderRadius:10, padding:"13px 26px", fontSize:15, fontWeight:700, cursor:"pointer" }}>+ CSV</button>
+            style={{ background:C.accent, color:"#fff", border:"none", borderRadius:10, padding:"13px 26px", fontSize:15, fontWeight:700, cursor:"pointer" }}>+ Manual CSV</button>
         </div>
         <div style={card({ padding:"12px 18px", maxWidth:480, textAlign:"left" })}>
           <div style={{ fontSize:12, color:C.muted, lineHeight:1.9 }}>
             <b style={{color:C.text}}>Strategy:</b><br/>
             1️⃣ <span style={{color:C.gtt}}>नया {period}D Low</span> → GTT @ {period}D High (daily trail down)<br/>
-            2️⃣ <span style={{color:C.buy}}>Price ≥ GTT</span> → Buy (fixed ₹{inr(fixedAmount)}/buy)<br/>
-            3️⃣ Target on avg: <b>B1→20%</b> · <b>B2→15%</b> · <b>B3→10%</b> (max 3 buys)<br/>
+            2️⃣ <span style={{color:C.buy}}>Price ≥ GTT</span> → Buy (₹{inr(fixedAmount)}/buy)<br/>
+            3️⃣ Target on avg: <b>B1→20%</b> · <b>B2→15%</b> · <b>B3→10%</b><br/>
             4️⃣ Target hit → सारी shares बेच दो
           </div>
         </div>
@@ -1390,7 +1276,7 @@ function App() {
           <div style={{ display:"flex", gap:12, alignItems:"center", flexWrap:"wrap" }}>
             <span style={{ fontSize:11, color:C.muted }}>Status ({fmtD(last.date)}):</span>
             {s.openPosition && <span style={{ background:"#04130b", color:C.buy, border:"1px solid #166534", borderRadius:6, padding:"3px 10px", fontSize:12, fontWeight:700 }}>
-              📈 {s.openPosition.numBuys} buys · Avg ₹{fmtN(s.openPosition.avgPrice)} → T ₹{fmtN(s.openPosition.target)} ({s.openPosition.targetPct*100}%)
+              📈 {s.openPosition.numBuys} buys · Avg ₹{fmtN(s.openPosition.avgPrice)} → T ₹{fmtN(s.openPosition.target)} ({(s.openPosition.targetPct*100).toFixed(0)}%)
             </span>}
             {!s.openPosition && s.pendingGtt && <span style={{ background:"#1c1407", color:C.gtt, border:"1px solid #78350f", borderRadius:6, padding:"3px 10px", fontSize:12, fontWeight:700 }}>🔔 GTT @ ₹{fmtN(s.pendingGtt.price)}</span>}
             {!s.openPosition && !s.pendingGtt && <span style={{ color:C.muted, fontSize:12 }}>⏳ IDLE</span>}
@@ -1447,7 +1333,7 @@ function App() {
           {s.trades.map(function(t,i){
             return <div key={i} style={{ background:"#04130b", border:"1px solid #166534", borderRadius:10, padding:"10px 14px" }}>
               <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8, flexWrap:"wrap", gap:6 }}>
-                <span style={{ color:"#86efac", fontWeight:700, fontSize:13 }}>#{s.trades.length-i} — {fmtD(t.entryDate)} → {fmtD(t.exitDate)} · {t.numBuys} buy{t.numBuys>1?"s":""}</span>
+                <span style={{ color:"#86efac", fontWeight:700, fontSize:13 }}>#{s.trades.length-i} — {fmtD(t.entryDate)} → {fmtD(t.exitDate)} · {t.numBuys} buys</span>
                 <span style={{ background:"#052e16", color:C.buy, border:"1px solid #166534", borderRadius:20, padding:"2px 10px", fontSize:11, fontWeight:700 }}>🎯 +{t.pct.toFixed(2)}% · {fmtRs(t.pnl)}</span>
               </div>
               {t.buys.map(function(b, bi){
@@ -1470,7 +1356,7 @@ function App() {
           {s.openPosition && <div style={{ background:"#1c1407", border:"1px solid #78350f", borderRadius:10, padding:"10px 14px" }}>
             <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8 }}>
               <span style={{ color:"#fde68a", fontWeight:700, fontSize:13 }}>OPEN — {fmtD(s.openPosition.entryDate)} · {s.openPosition.numBuys}/3 buys</span>
-              <span style={{ background:"#1c1407", color:C.gtt, border:"1px solid #78350f", borderRadius:20, padding:"2px 10px", fontSize:11, fontWeight:700 }}>{s.openPosition.targetPct*100}% target</span>
+              <span style={{ background:"#1c1407", color:C.gtt, border:"1px solid #78350f", borderRadius:20, padding:"2px 10px", fontSize:11, fontWeight:700 }}>{(s.openPosition.targetPct*100).toFixed(0)}% target</span>
             </div>
             {s.openPosition.buys.map(function(b, bi){
               return <div key={bi} style={{ display:"flex", gap:10, fontSize:11, color:"#94a3b8", flexWrap:"wrap", marginBottom:3 }}>
@@ -1555,25 +1441,21 @@ function App() {
         {view==="portfolio" && <PortfolioView stocks={stocks} onSelect={function(i){ setActive(i); setView("chart"); }}/>}
       </div>}
 
-      {listOpen && <StocksListModal
+      {listOpen && <SheetStockModal
         onClose={function(){ setListOpen(false); }}
-        onPick={pickFromList}
-        loadingSym={loadingSym}
-        loadAll={loadAllFromSheet}
-        autoProgress={autoProgress}
+        onLoad={function(st){ pickFromList(st); }}
         stockList={stockList}
         sheetInfo={sheetInfo}
         reloadSheet={loadSheet}
         period={period}
         targetSteps={targetSteps}
         fixedAmount={fixedAmount}
-        hasBohCol={sheetInfo.hasBoh}
       />}
 
       {modal && <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.8)", display:"flex", alignItems:"flex-end", zIndex:100 }}
         onClick={function(e){ if (e.currentTarget===e.target) { setModal(false); setErr(""); } }}>
         <div style={{ background:"#0d1a2a", borderTop:"1px solid "+C.border, borderRadius:"18px 18px 0 0", padding:20, width:"100%", maxHeight:"90vh", overflowY:"auto" }}>
-          <div style={{ fontWeight:700, fontSize:16, marginBottom:18 }}>📥 Stock Add</div>
+          <div style={{ fontWeight:700, fontSize:16, marginBottom:18 }}>📥 Manual CSV</div>
           <label style={{ fontSize:12, color:C.muted, display:"block", marginBottom:4 }}>📥 Yahoo से</label>
           <input list="nifty200-list" value={label} onChange={function(e){ setLabel(e.target.value); }} placeholder="Stock"
             style={{ width:"100%", background:C.bg, border:"1px solid "+C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:14, boxSizing:"border-box", marginBottom:10, outline:"none" }}/>
@@ -1601,39 +1483,6 @@ function App() {
               style={{ flex:1, background:C.border, color:C.text, border:"none", borderRadius:10, padding:12, fontSize:14, cursor:"pointer" }}>Cancel</button>
             <button onClick={submitAdd}
               style={{ flex:2, background:C.accent, color:"#fff", border:"none", borderRadius:10, padding:12, fontSize:14, fontWeight:700, cursor:"pointer" }}>✅ Manual CSV</button>
-          </div>
-        </div>
-      </div>}
-
-      {bulkModal && <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.8)", display:"flex", alignItems:"flex-end", zIndex:100 }}
-        onClick={function(e){ if (e.currentTarget===e.target && !bulkProg.total) setBulkModal(false); }}>
-        <div style={{ background:"#0d1a2a", borderTop:"1px solid "+C.border, borderRadius:"18px 18px 0 0", padding:20, width:"100%", maxHeight:"90vh", overflowY:"auto" }}>
-          <div style={{ fontWeight:700, fontSize:16, marginBottom:6, color:"#c4b5fd" }}>⚡ Bulk Add</div>
-          <div style={{ fontSize:11, color:C.muted, marginBottom:14 }}>Symbols एक-एक लाइन पर या comma से</div>
-          <textarea value={bulkTxt} onChange={function(e){ setBulkTxt(e.target.value); }} rows={6}
-            placeholder={"RELIANCE\nTCS\nINFY\nHDFCBANK"}
-            disabled={!!bulkProg.total}
-            style={{ width:"100%", background:C.bg, border:"1px solid "+C.border, borderRadius:8, padding:"10px 12px", color:C.text, fontSize:12, fontFamily:"monospace", resize:"vertical", boxSizing:"border-box", marginBottom:10, outline:"none", opacity: bulkProg.total ? 0.5 : 1 }}/>
-          {bulkProg.total > 0 && <div style={{ background:"#1e1b4b", border:"1px solid #7c3aed", borderRadius:8, padding:"10px 12px", fontSize:12, marginBottom:12 }}>
-            <div style={{color:"#c4b5fd",fontWeight:700,marginBottom:6}}>Progress: {bulkProg.current}/{bulkProg.total}</div>
-            <div style={{background:"#0d1a2a",borderRadius:4,height:8,overflow:"hidden",marginBottom:6}}>
-              <div style={{background:"#7c3aed",height:"100%",width:(bulkProg.current/bulkProg.total*100)+"%",transition:"width 0.3s"}}/>
-            </div>
-            <div style={{color:C.muted,fontSize:11}}>{bulkProg.msg}</div>
-          </div>}
-          {bulkErrors.length > 0 && <div style={{ background:"rgba(239,68,68,.1)", border:"1px solid rgba(239,68,68,.3)", borderRadius:8, padding:"10px 12px", fontSize:11, marginBottom:12, color:"#fca5a5", maxHeight:150, overflowY:"auto" }}>
-            <div style={{fontWeight:700, marginBottom:6}}>⚠️ Failed:</div>
-            {bulkErrors.map(function(e, i){ return <div key={i}>• {e}</div>; })}
-          </div>}
-          <div style={{ display:"flex", gap:10 }}>
-            <button onClick={function(){ if (!bulkProg.total) { setBulkModal(false); setBulkErrors([]); } }}
-              disabled={!!bulkProg.total}
-              style={{ flex:1, background:C.border, color:C.text, border:"none", borderRadius:10, padding:12, fontSize:14, cursor: bulkProg.total ? "not-allowed" : "pointer", opacity: bulkProg.total ? 0.5 : 1 }}>Cancel</button>
-            <button onClick={bulkLoad}
-              disabled={!!bulkProg.total || !bulkTxt.trim()}
-              style={{ flex:2, background:"#7c3aed", color:"#fff", border:"none", borderRadius:10, padding:12, fontSize:14, fontWeight:700, cursor: bulkProg.total ? "not-allowed" : "pointer", opacity: (bulkProg.total || !bulkTxt.trim()) ? 0.5 : 1 }}>
-              {bulkProg.total ? "⏳ " + bulkProg.current + "/" + bulkProg.total : "⚡ Load"}
-            </button>
           </div>
         </div>
       </div>}
