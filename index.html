@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>20D Breakout + GTT</title>
+<title>20D Breakout + GTT (A2 Sheet · 3-Buy Avg)</title>
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; background: #080f1a; -webkit-tap-highlight-color: transparent; }
@@ -21,7 +21,7 @@
 <script type="text/babel">
 const { useState, useEffect } = React;
 
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxHcFkqN0uMbwACz_ghb1paU02wg6cc2nc6NUncV-T6J3K5bljaQEmJjxyd0Jfii3x-/exec";
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx5mVZIErWjOyKpAkZItpr3X69fgJ2Id0f2wkKLCQcd1pd0sfupIkJ5k3pxsldcx9J-/exec";
 const SHEET_TAB       = "20 DAY TESTING";
 
 const DEFAULT_PERIOD       = 20;
@@ -119,7 +119,8 @@ async function fetchFromYahoo(sym, range) {
 }
 
 /* ================================================================
-   FETCH FROM APPS SCRIPT — A2 cell
+   FETCH FROM APPS SCRIPT — A2 cell से single stock
+   Supports: string, {a2}, {symbol}, {values:[[...]]}, {stocks:[..]}, [..]
    ================================================================ */
 async function fetchSheetStocks() {
   if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf("PASTE_") === 0) {
@@ -276,11 +277,13 @@ function calcSignals(rows, period, eps, fixedAmount, targetSteps) {
     const r = enriched[i];
     if (r.d20H == null) continue;
 
+    // 1. Target hit → EXIT ALL
     if (totalShares > 0 && r.high >= targetPrice - eps) {
       doExit(r);
       continue;
     }
 
+    // 2. GTT trigger → BUY
     if (gttActive) {
       const trigger = r.prevD20H;
       if (trigger != null && r.high >= trigger - eps) {
@@ -310,6 +313,7 @@ function calcSignals(rows, period, eps, fixedAmount, targetSteps) {
       continue;
     }
 
+    // 3. newLow → GTT place
     if (r.newLow && buys.length < MAX_BUYS) {
       gttActive = true;
       r.events.push("gtt-placed");
@@ -317,6 +321,7 @@ function calcSignals(rows, period, eps, fixedAmount, targetSteps) {
       continue;
     }
 
+    // 4. Holding — record for display
     if (totalShares > 0) {
       r.position = { avgPrice: avgPrice, target: targetPrice, shares: totalShares, buys: buys.length, targetPct: currentTargetPct };
     }
@@ -461,12 +466,4 @@ function calcScreenerRow(stock) {
     name: stock.name, status: status, label: label, priority: priority, detail: detail,
     close: last.close, d20H: last.d20H, d20L: last.d20L, date: last.date,
     gtt: stock.pendingGtt ? stock.pendingGtt.price : null,
-    target: stock.openPosition ? stock.openPosition.target : null,
-    avg: stock.openPosition ? stock.openPosition.avgPrice : null,
-    numBuys: stock.openPosition ? stock.openPosition.numBuys : 0,
-    amount: stock.amount || DEFAULT_FIXED_AMOUNT
-  };
-}
-
-function MiniChart(props) {
-  var rows = props.ro
+    target: stock.openPosition ? stock.openPosition.target : nu
