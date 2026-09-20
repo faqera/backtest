@@ -3,467 +3,394 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>20D Breakout + GTT (A2 Sheet · 3-Buy Avg)</title>
+<title>Darvas Box Backtest v4 (Apps Script)</title>
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; background: #080f1a; -webkit-tap-highlight-color: transparent; }
   input, textarea, button, select { font-family: inherit; }
-  input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .spin { animation: spin 1s linear infinite; display: inline-block; }
 </style>
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+
 </head>
 <body>
 <div id="root"></div>
-<script type="text/babel">
-const { useState, useEffect } = React;
-
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx5mVZIErWjOyKpAkZItpr3X69fgJ2Id0f2wkKLCQcd1pd0sfupIkJ5k3pxsldcx9J-/exec";
-const SHEET_TAB       = "20 DAY TESTING";
-
-const DEFAULT_PERIOD       = 20;
-const DEFAULT_EPS          = 0.03;
-const DEFAULT_FIXED_AMOUNT = 25000;
-const DEFAULT_TARGETS      = [0.20, 0.15, 0.10];
-const MAX_BUYS             = 3;
-const DEFAULT_RANGE        = "2y";
-const SETTINGS_KEY         = "backtest_settings_v5";
-const STOCKS_KEY           = "backtest_stocks_v4";
-
-const RANGE_OPTIONS = [
-  { key:"6mo", label:"6M" }, { key:"1y", label:"1Y" },
-  { key:"2y",  label:"2Y" }, { key:"5y", label:"5Y" },
-];
-
-const FALLBACK_STOCKS = [
-  { sym:"RELIANCE", name:"Reliance Industries", suitable:true },
-];
-
-/* ---------- formatters ---------- */
-function fmtD(d) { return d ? new Date(d).toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"2-digit" }) : "—"; }
-function fmtDISODate(d) { if (!d) return ""; const dt=new Date(d); return dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0"); }
-function fmtN(v,dec) { return (v==null||isNaN(v)) ? "—" : Number(v).toFixed(dec==null?2:dec); }
-function fmtRs(v) { if (v==null||isNaN(v)) return "—"; var n=Number(v), sign=n<0?"-":""; return sign+"₹"+Math.abs(Math.round(n)).toLocaleString("en-IN"); }
-function inr(v) { return (v==null||isNaN(v)) ? "—" : Number(v).toLocaleString("en-IN",{maximumFractionDigits:2}); }
-function csvEsc(v) { if (v==null) return ""; var s=String(v); return (s.indexOf(",")>=0||s.indexOf('"')>=0||s.indexOf("\n")>=0) ? '"'+s.replace(/"/g,'""')+'"' : s; }
-function downloadCSV(filename, rows) {
-  var csv = rows.map(function(r){ return r.map(csvEsc).join(","); }).join("\n");
-  var blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement("a"); a.href=url; a.download=filename;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  setTimeout(function(){ URL.revokeObjectURL(url); }, 500);
-}
-function dateStamp() { var d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
-
-function parseDateCell(s) {
-  if (s == null) return null;
-  const str = String(s).trim();
-  if (!str) return null;
-  if (str.indexOf("/")===-1 && str.indexOf("-")===-1 && str.indexOf(":")===-1) {
-    const n = parseFloat(str);
-    if (!isNaN(n) && n>25000 && n<100000) {
-      const d = new Date((n-25569)*86400*1000);
-      if (!isNaN(d.getTime())) return d;
-    }
-  }
-  const d = new Date(str);
-  return isNaN(d.getTime()) ? null : d;
-}
-
-async function fetchViaProxy(url) {
-  const proxies = [
-    "https://api.allorigins.win/raw?url=" + encodeURIComponent(url),
-    "https://api.cors.lol/?url=" + encodeURIComponent(url),
-    "https://thingproxy.freeboard.io/fetch/" + url,
-    "https://corsproxy.io/?url=" + encodeURIComponent(url),
-  ];
-  let lastErr = "";
-  for (let i = 0; i < proxies.length; i++) {
-    try {
-      const res = await fetch(proxies[i]);
-      if (!res.ok) { lastErr = "HTTP " + res.status; continue; }
-      const text = await res.text();
-      if (text && text.length > 20) return text;
-    } catch (e) { lastErr = e.message; }
-  }
-  throw new Error("Data नहीं मिला (" + lastErr + ")");
-}
-
-async function fetchFromYahoo(sym, range) {
-  const clean = String(sym).toUpperCase().replace(/^NSE:/, "").trim();
-  const ySym = clean + ".NS";
-  const rng = range || DEFAULT_RANGE;
-  const yUrl = "https://query1.finance.yahoo.com/v8/finance/chart/" + ySym + "?interval=1d&range=" + rng;
-  const text = await fetchViaProxy(yUrl);
-  let json;
-  try { json = JSON.parse(text); } catch (e) { throw new Error("Yahoo response गलत"); }
-  const r = json && json.chart && json.chart.result && json.chart.result[0];
-  if (!r) throw new Error("Symbol गलत है या NSE पर listed नहीं");
-  const ts = r.timestamp || [];
-  const q = (r.indicators && r.indicators.quote && r.indicators.quote[0]) || {};
-  const lines = ["Date,Open,High,Low,Close,Volume"];
-  for (let i = 0; i < ts.length; i++) {
-    const d = new Date(ts[i] * 1000);
-    const ds = (d.getMonth()+1)+"/"+d.getDate()+"/"+d.getFullYear();
-    const o=q.open?q.open[i]:null, h=q.high?q.high[i]:null, l=q.low?q.low[i]:null, c=q.close?q.close[i]:null;
-    const v = q.volume ? q.volume[i] : 0;
-    if (o==null||h==null||l==null||c==null) continue;
-    lines.push(ds+","+o+","+h+","+l+","+c+","+(v||0));
-  }
-  if (lines.length < 21) throw new Error("कम data मिला (" + (lines.length-1) + " rows)");
-  return { csv: lines.join("\n"), name: "NSE:" + clean, rows: lines.length - 1 };
-}
+<script>
+function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == typeof Symbol && "symbol" == typeof Symbol.iterator ? function (o) { return typeof o; } : function (o) { return o && "function" == typeof Symbol && o.constructor === Symbol && o !== Symbol.prototype ? "symbol" : typeof o; }, _typeof(o); }
+function _regenerator() { /*! regenerator-runtime -- Copyright (c) 2014-present, Facebook, Inc. -- license (MIT): https://github.com/babel/babel/blob/main/packages/babel-helpers/LICENSE */ var e, t, r = "function" == typeof Symbol ? Symbol : {}, n = r.iterator || "@@iterator", o = r.toStringTag || "@@toStringTag"; function i(r, n, o, i) { var c = n && n.prototype instanceof Generator ? n : Generator, u = Object.create(c.prototype); return _regeneratorDefine2(u, "_invoke", function (r, n, o) { var i, c, u, f = 0, p = o || [], y = !1, G = { p: 0, n: 0, v: e, a: d, f: d.bind(e, 4), d: function d(t, r) { return i = t, c = 0, u = e, G.n = r, a; } }; function d(r, n) { for (c = r, u = n, t = 0; !y && f && !o && t < p.length; t++) { var o, i = p[t], d = G.p, l = i[2]; r > 3 ? (o = l === n) && (u = i[(c = i[4]) ? 5 : (c = 3, 3)], i[4] = i[5] = e) : i[0] <= d && ((o = r < 2 && d < i[1]) ? (c = 0, G.v = n, G.n = i[1]) : d < l && (o = r < 3 || i[0] > n || n > l) && (i[4] = r, i[5] = n, G.n = l, c = 0)); } if (o || r > 1) return a; throw y = !0, n; } return function (o, p, l) { if (f > 1) throw TypeError("Generator is already running"); for (y && 1 === p && d(p, l), c = p, u = l; (t = c < 2 ? e : u) || !y;) { i || (c ? c < 3 ? (c > 1 && (G.n = -1), d(c, u)) : G.n = u : G.v = u); try { if (f = 2, i) { if (c || (o = "next"), t = i[o]) { if (!(t = t.call(i, u))) throw TypeError("iterator result is not an object"); if (!t.done) return t; u = t.value, c < 2 && (c = 0); } else 1 === c && (t = i.return) && t.call(i), c < 2 && (u = TypeError("The iterator does not provide a '" + o + "' method"), c = 1); i = e; } else if ((t = (y = G.n < 0) ? u : r.call(n, G)) !== a) break; } catch (t) { i = e, c = 1, u = t; } finally { f = 1; } } return { value: t, done: y }; }; }(r, o, i), !0), u; } var a = {}; function Generator() {} function GeneratorFunction() {} function GeneratorFunctionPrototype() {} t = Object.getPrototypeOf; var c = [][n] ? t(t([][n]())) : (_regeneratorDefine2(t = {}, n, function () { return this; }), t), u = GeneratorFunctionPrototype.prototype = Generator.prototype = Object.create(c); function f(e) { return Object.setPrototypeOf ? Object.setPrototypeOf(e, GeneratorFunctionPrototype) : (e.__proto__ = GeneratorFunctionPrototype, _regeneratorDefine2(e, o, "GeneratorFunction")), e.prototype = Object.create(u), e; } return GeneratorFunction.prototype = GeneratorFunctionPrototype, _regeneratorDefine2(u, "constructor", GeneratorFunctionPrototype), _regeneratorDefine2(GeneratorFunctionPrototype, "constructor", GeneratorFunction), GeneratorFunction.displayName = "GeneratorFunction", _regeneratorDefine2(GeneratorFunctionPrototype, o, "GeneratorFunction"), _regeneratorDefine2(u), _regeneratorDefine2(u, o, "Generator"), _regeneratorDefine2(u, n, function () { return this; }), _regeneratorDefine2(u, "toString", function () { return "[object Generator]"; }), (_regenerator = function _regenerator() { return { w: i, m: f }; })(); }
+function _regeneratorDefine2(e, r, n, t) { var i = Object.defineProperty; try { i({}, "", {}); } catch (e) { i = 0; } _regeneratorDefine2 = function _regeneratorDefine(e, r, n, t) { function o(r, n) { _regeneratorDefine2(e, r, function (e) { return this._invoke(r, n, e); }); } r ? i ? i(e, r, { value: n, enumerable: !t, configurable: !t, writable: !t }) : e[r] = n : (o("next", 0), o("throw", 1), o("return", 2)); }, _regeneratorDefine2(e, r, n, t); }
+function _slicedToArray(r, e) { return _arrayWithHoles(r) || _iterableToArrayLimit(r, e) || _unsupportedIterableToArray(r, e) || _nonIterableRest(); }
+function _nonIterableRest() { throw new TypeError("Invalid attempt to destructure non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method."); }
+function _iterableToArrayLimit(r, l) { var t = null == r ? null : "undefined" != typeof Symbol && r[Symbol.iterator] || r["@@iterator"]; if (null != t) { var e, n, i, u, a = [], f = !0, o = !1; try { if (i = (t = t.call(r)).next, 0 === l) { if (Object(t) !== t) return; f = !1; } else for (; !(f = (e = i.call(t)).done) && (a.push(e.value), a.length !== l); f = !0); } catch (r) { o = !0, n = r; } finally { try { if (!f && null != t.return && (u = t.return(), Object(u) !== u)) return; } finally { if (o) throw n; } } return a; } }
+function _arrayWithHoles(r) { if (Array.isArray(r)) return r; }
+function ownKeys(e, r) { var t = Object.keys(e); if (Object.getOwnPropertySymbols) { var o = Object.getOwnPropertySymbols(e); r && (o = o.filter(function (r) { return Object.getOwnPropertyDescriptor(e, r).enumerable; })), t.push.apply(t, o); } return t; }
+function _objectSpread(e) { for (var r = 1; r < arguments.length; r++) { var t = null != arguments[r] ? arguments[r] : {}; r % 2 ? ownKeys(Object(t), !0).forEach(function (r) { _defineProperty(e, r, t[r]); }) : Object.getOwnPropertyDescriptors ? Object.defineProperties(e, Object.getOwnPropertyDescriptors(t)) : ownKeys(Object(t)).forEach(function (r) { Object.defineProperty(e, r, Object.getOwnPropertyDescriptor(t, r)); }); } return e; }
+function _defineProperty(e, r, t) { return (r = _toPropertyKey(r)) in e ? Object.defineProperty(e, r, { value: t, enumerable: !0, configurable: !0, writable: !0 }) : e[r] = t, e; }
+function _toPropertyKey(t) { var i = _toPrimitive(t, "string"); return "symbol" == _typeof(i) ? i : i + ""; }
+function _toPrimitive(t, r) { if ("object" != _typeof(t) || !t) return t; var e = t[Symbol.toPrimitive]; if (void 0 !== e) { var i = e.call(t, r || "default"); if ("object" != _typeof(i)) return i; throw new TypeError("@@toPrimitive must return a primitive value."); } return ("string" === r ? String : Number)(t); }
+function _toConsumableArray(r) { return _arrayWithoutHoles(r) || _iterableToArray(r) || _unsupportedIterableToArray(r) || _nonIterableSpread(); }
+function _nonIterableSpread() { throw new TypeError("Invalid attempt to spread non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method."); }
+function _unsupportedIterableToArray(r, a) { if (r) { if ("string" == typeof r) return _arrayLikeToArray(r, a); var t = {}.toString.call(r).slice(8, -1); return "Object" === t && r.constructor && (t = r.constructor.name), "Map" === t || "Set" === t ? Array.from(r) : "Arguments" === t || /^(?:Ui|I)nt(?:8|16|32)(?:Clamped)?Array$/.test(t) ? _arrayLikeToArray(r, a) : void 0; } }
+function _iterableToArray(r) { if ("undefined" != typeof Symbol && null != r[Symbol.iterator] || null != r["@@iterator"]) return Array.from(r); }
+function _arrayWithoutHoles(r) { if (Array.isArray(r)) return _arrayLikeToArray(r); }
+function _arrayLikeToArray(r, a) { (null == a || a > r.length) && (a = r.length); for (var e = 0, n = Array(a); e < a; e++) n[e] = r[e]; return n; }
+function asyncGeneratorStep(n, t, e, r, o, a, c) { try { var i = n[a](c), u = i.value; } catch (n) { return void e(n); } i.done ? t(u) : Promise.resolve(u).then(r, o); }
+function _asyncToGenerator(n) { return function () { var t = this, e = arguments; return new Promise(function (r, o) { var a = n.apply(t, e); function _next(n) { asyncGeneratorStep(a, r, o, _next, _throw, "next", n); } function _throw(n) { asyncGeneratorStep(a, r, o, _next, _throw, "throw", n); } _next(void 0); }); }; }
+var _React = React,
+  useState = _React.useState,
+  useEffect = _React.useEffect;
 
 /* ================================================================
-   FETCH FROM APPS SCRIPT — A2 cell से single stock
-   Supports: string, {a2}, {symbol}, {values:[[...]]}, {stocks:[..]}, [..]
+   ⚠️ यहाँ अपना Apps Script Web App URL paste करें
    ================================================================ */
-async function fetchSheetStocks() {
-  if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf("PASTE_") === 0) {
-    throw new Error("Apps Script URL set नहीं किया");
-  }
-  const sep = APPS_SCRIPT_URL.indexOf("?") >= 0 ? "&" : "?";
-  const url = APPS_SCRIPT_URL + sep + "tab=" + encodeURIComponent(SHEET_TAB);
-  const res = await fetch(url);
-  if (!res.ok) throw new Error("Apps Script HTTP " + res.status);
-  const json = await res.json();
-  if (json && json.error) throw new Error(json.error);
-
-  let raw = "";
-  let name = "";
-  let bohText = "";
-  let suitable = true;
-
-  if (typeof json === "string") {
-    raw = json;
-  } else if (json && json.a2 != null) {
-    raw = json.a2;
-  } else if (json && json.symbol != null) {
-    raw = json.symbol;
-  } else if (json && Array.isArray(json.values) && json.values.length >= 1) {
-    const a2row = json.values[1] || json.values[0];
-    raw = a2row && a2row[0];
-  } else if (json && Array.isArray(json.stocks) && json.stocks.length) {
-    const first = json.stocks[0];
-    if (first && typeof first === "object") {
-      const keys = Object.keys(first);
-      const sk = keys.find(function(k){ return /symbol|sym|ticker|stock|scrip/i.test(k); }) || keys[0];
-      raw = first[sk];
-      const nk = keys.find(function(k){ return /name|company/i.test(k); });
-      if (nk) name = String(first[nk] || "").trim();
-      const bk = keys.find(function(k){ return /boh|suitable|status/i.test(k); });
-      if (bk) {
-        bohText = String(first[bk] || "").trim();
-        suitable = !(/^(a|avoid|no|n|fail|false|0|✗|x)$/i.test(bohText));
-      }
-    } else {
-      raw = first;
-    }
-  } else if (json && Array.isArray(json) && json.length) {
-    raw = json[0];
-  }
-
-  const sym = String(raw || "").trim().toUpperCase().replace(/\.NS$|^NSE:/i, "");
-  if (!sym || !/^[A-Z0-9&\-]+$/.test(sym)) {
-    throw new Error('A2 में valid stock symbol नहीं मिला (मिला: "' + String(raw) + '")');
-  }
-  if (!name) name = sym;
-
-  return {
-    stocks: [{ sym: sym, name: name, suitable: suitable, bohText: bohText }],
-    cols: ["Symbol"],
-    totalRows: 1,
-    hasBoh: !!bohText,
-  };
-}
-
-function parseCSV(raw, minPeriod) {
-  if (!raw || !raw.trim()) return { error: "CSV खाली है।" };
-  minPeriod = minPeriod || DEFAULT_PERIOD;
-  const lines = raw.trim().split("\n").map(function(l){ return l.trim(); }).filter(Boolean);
-  let stockName = "", hIdx = -1;
-  for (let i = 0; i < Math.min(lines.length, 12); i++) {
-    if (/^date/i.test(lines[i])) { hIdx = i; break; }
-    const p = lines[i].split(",");
-    const cell = p[0] ? p[0].trim() : "";
-    if (cell && !/^\d/.test(cell) && !/\*/.test(cell) && cell.length > 1 && cell.toUpperCase() !== "STOCK") stockName = cell;
-  }
-  if (hIdx === -1) return { error: 'Header row "Date,Open,High,Low,Close" नहीं मिला।' };
-  const hdr = lines[hIdx].split(",").map(function(h){ return h.trim().toLowerCase(); });
-  const gi = function(){
-    for (let j = 0; j < arguments.length; j++) {
-      const x = hdr.indexOf(arguments[j]);
-      if (x >= 0) return x;
-    }
-    return -1;
-  };
-  const di=gi("date","datetime","time"), oi=gi("open"), hi=gi("high"), li=gi("low"), ci=gi("close"), vi=gi("volume","vol");
-  if ([di,hi,li].some(function(x){ return x < 0; })) return { error: "Date / High / Low columns नहीं मिले।" };
-  const rows = [];
-  for (let i = hIdx+1; i < lines.length; i++) {
-    const p = lines[i].split(",");
-    if (p.length < 4) continue;
-    const ds = p[di] ? p[di].trim() : "";
-    if (!ds) continue;
-    const d = parseDateCell(ds);
-    if (!d) continue;
-    const high=parseFloat(p[hi]), low=parseFloat(p[li]);
-    const close = ci>=0 ? parseFloat(p[ci]) : high;
-    const open  = oi>=0 ? parseFloat(p[oi]) : close;
-    const vol   = vi>=0 ? (parseInt(p[vi])||0) : 0;
-    if (isNaN(high) || isNaN(low)) continue;
-    rows.push({ date: d, open: open, high: high, low: low, close: close, vol: vol, ts: d.getTime() });
-  }
-  rows.sort(function(a,b){ return a.ts - b.ts; });
-  if (rows.length < minPeriod) return { error: "कम से कम " + minPeriod + " rows चाहिए। मिले: " + rows.length };
-  return { stockName: stockName, rows: rows };
-}
+var APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwdy2MQ1rabJJktk-2WcO6J8xAQXUCLIBtmcIvdTZ9nJlFI6LicyI4bc75OuqVPJ-jB/exec";
 
 /* ================================================================
-   CORE STRATEGY — 20D Breakout + GTT + 3-BUY AVERAGING
+   RULES
    ================================================================ */
-function calcSignals(rows, period, eps, fixedAmount, targetSteps) {
-  period = period || DEFAULT_PERIOD;
-  eps = eps == null ? DEFAULT_EPS : eps;
-  fixedAmount = fixedAmount || DEFAULT_FIXED_AMOUNT;
-  targetSteps = targetSteps || DEFAULT_TARGETS;
-
-  const enriched = rows.map(function(r, i) {
-    if (i < period - 1) return Object.assign({}, r, { d20L: null, d20H: null, prevD20H: null, newLow: false, events: [], gttPrice: null });
-    const win = rows.slice(i - period + 1, i + 1);
-    const d20L = Math.min.apply(null, win.map(function(x){ return x.low; }));
-    const d20H = Math.max.apply(null, win.map(function(x){ return x.high; }));
-    return Object.assign({}, r, { d20L: d20L, d20H: d20H, prevD20H: null, newLow: r.low <= d20L + eps, events: [], gttPrice: null });
+var TARGET_PCT = 0.06;
+var IGNORE_PCT = 0.0275;
+var PARTS = 6;
+var DEFAULT_CAPITAL = 120000;
+var DEFAULT_RANGE = "2y";
+var TRIGGER_SOURCES = [{
+  key: "1w",
+  label: "1W High (Weekly)"
+}, {
+  key: "2w",
+  label: "2W High (Fortnight)"
+}, {
+  key: "4w",
+  label: "4W High (Monthly)"
+}];
+var FALLBACK_STOCKS = [{
+  sym: "RELIANCE",
+  name: "Reliance Industries"
+}, {
+  sym: "TCS",
+  name: "Tata Consultancy Services"
+}, {
+  sym: "HDFCBANK",
+  name: "HDFC Bank"
+}, {
+  sym: "INFY",
+  name: "Infosys"
+}, {
+  sym: "ICICIBANK",
+  name: "ICICI Bank"
+}, {
+  sym: "SBIN",
+  name: "State Bank of India"
+}, {
+  sym: "ITC",
+  name: "ITC"
+}];
+var fmtD = function fmtD(d) {
+  return d ? new Date(d).toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "2-digit"
+  }) : "—";
+};
+var fmtDISO = function fmtDISO(d) {
+  if (!d) return "";
+  var dt = new Date(d);
+  return "".concat(dt.getFullYear(), "-").concat(String(dt.getMonth() + 1).padStart(2, "0"), "-").concat(String(dt.getDate()).padStart(2, "0"));
+};
+var fmtN = function fmtN(v) {
+  var d = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : 2;
+  return v == null || isNaN(v) ? "—" : Number(v).toFixed(d);
+};
+var inr = function inr(v) {
+  return v == null || isNaN(v) ? "—" : Number(v).toLocaleString("en-IN", {
+    maximumFractionDigits: 2
   });
-  for (let i = 1; i < enriched.length; i++) {
-    if (enriched[i-1].d20H != null) enriched[i].prevD20H = enriched[i-1].d20H;
-  }
+};
 
-  let buys = [];
-  let totalShares = 0;
-  let totalCost = 0;
-  let avgPrice = 0;
-  let targetPrice = 0;
-  let currentTargetPct = 0;
-  let gttActive = false;
-  const trades = [];
-
-  function doExit(r) {
-    const exitPrice = targetPrice;
-    r.events.push("target");
-    trades.push({
-      buys: buys.slice(),
-      entryDate: buys[0].date,
-      exitDate: r.date,
-      numBuys: buys.length,
-      shares: totalShares,
-      cost: totalCost,
-      exit: exitPrice,
-      proceeds: totalShares * exitPrice,
-      pnl: totalShares * exitPrice - totalCost,
-      pct: (exitPrice / avgPrice - 1) * 100,
-      targetPct: currentTargetPct,
-      days: Math.round((r.ts - buys[0].date.getTime()) / 86400000)
-    });
-    buys = []; totalShares = 0; totalCost = 0; avgPrice = 0; targetPrice = 0;
-    currentTargetPct = 0; gttActive = false;
-  }
-
-  for (let i = 0; i < enriched.length; i++) {
-    const r = enriched[i];
-    if (r.d20H == null) continue;
-
-    // 1. Target hit → EXIT ALL
-    if (totalShares > 0 && r.high >= targetPrice - eps) {
-      doExit(r);
-      continue;
-    }
-
-    // 2. GTT trigger → BUY
-    if (gttActive) {
-      const trigger = r.prevD20H;
-      if (trigger != null && r.high >= trigger - eps) {
-        const qty = Math.max(1, Math.floor(fixedAmount / trigger));
-        const buyIdx = buys.length;
-        buys.push({ date: r.date, price: trigger, qty: qty, buyIdx: buyIdx });
-        totalShares += qty;
-        totalCost += qty * trigger;
-        avgPrice = totalCost / totalShares;
-        currentTargetPct = targetSteps[Math.min(buyIdx, targetSteps.length - 1)];
-        targetPrice = avgPrice * (1 + currentTargetPct);
-        gttActive = false;
-
-        r.events.push(buyIdx === 0 ? "buy" : ("buy" + (buyIdx + 1)));
-        r.gttPrice = trigger;
-        r.buyPrice = trigger;
-        r.buyQty = qty;
-        r.buyIdx = buyIdx;
-        r.position = { avgPrice: avgPrice, target: targetPrice, shares: totalShares, buys: buys.length, targetPct: currentTargetPct };
-
-        if (r.high >= targetPrice - eps) {
-          doExit(r);
-        }
-        continue;
+/* ================================================================
+   PROXY FALLBACK (सिर्फ Yahoo के लिए, Apps Script direct fetch)
+   ================================================================ */
+var PROXIES = [function (u) {
+  return "https://api.allorigins.win/raw?url=".concat(encodeURIComponent(u));
+}, function (u) {
+  return "https://corsproxy.io/?url=".concat(encodeURIComponent(u));
+}];
+function fetchWithFallback(_x) {
+  return _fetchWithFallback.apply(this, arguments);
+}
+/* ================================================================
+   FETCH FROM APPS SCRIPT — direct, no proxy needed
+   ================================================================ */
+function _fetchWithFallback() {
+  _fetchWithFallback = _asyncToGenerator(/*#__PURE__*/_regenerator().m(function _callee5(url) {
+    var lastErr, i, res, _t4;
+    return _regenerator().w(function (_context5) {
+      while (1) switch (_context5.p = _context5.n) {
+        case 0:
+          lastErr = null;
+          i = 0;
+        case 1:
+          if (!(i < PROXIES.length)) {
+            _context5.n = 7;
+            break;
+          }
+          _context5.p = 2;
+          _context5.n = 3;
+          return fetch(PROXIES[i](url));
+        case 3:
+          res = _context5.v;
+          if (!res.ok) {
+            _context5.n = 4;
+            break;
+          }
+          return _context5.a(2, res);
+        case 4:
+          _context5.n = 6;
+          break;
+        case 5:
+          _context5.p = 5;
+          _t4 = _context5.v;
+          lastErr = _t4;
+        case 6:
+          i++;
+          _context5.n = 1;
+          break;
+        case 7:
+          throw lastErr || new Error("All proxies failed");
+        case 8:
+          return _context5.a(2);
       }
-      r.gttPrice = r.d20H;
-      continue;
-    }
-
-    // 3. newLow → GTT place
-    if (r.newLow && buys.length < MAX_BUYS) {
-      gttActive = true;
-      r.events.push("gtt-placed");
-      r.gttPrice = r.d20H;
-      continue;
-    }
-
-    // 4. Holding — record for display
-    if (totalShares > 0) {
-      r.position = { avgPrice: avgPrice, target: targetPrice, shares: totalShares, buys: buys.length, targetPct: currentTargetPct };
-    }
-  }
-
-  let openPosition = null;
-  if (totalShares > 0) {
-    openPosition = {
-      buys: buys.slice(),
-      avgPrice: avgPrice, target: targetPrice, shares: totalShares,
-      cost: totalCost, targetPct: currentTargetPct,
-      entryDate: buys[0].date, numBuys: buys.length
+    }, _callee5, null, [[2, 5]]);
+  }));
+  return _fetchWithFallback.apply(this, arguments);
+}
+function fetchSheetStocks() {
+  return _fetchSheetStocks.apply(this, arguments);
+}
+/* ================================================================
+   YAHOO OHLC
+   ================================================================ */
+function _fetchSheetStocks() {
+  _fetchSheetStocks = _asyncToGenerator(/*#__PURE__*/_regenerator().m(function _callee6() {
+    var res, json, headers, rows, findCol, symCol, nameCol, suitCol, stocks;
+    return _regenerator().w(function (_context6) {
+      while (1) switch (_context6.n) {
+        case 0:
+          if (!(!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf("PASTE_") === 0)) {
+            _context6.n = 1;
+            break;
+          }
+          throw new Error("Apps Script URL set नहीं किया — code के top पर APPS_SCRIPT_URL भरें");
+        case 1:
+          _context6.n = 2;
+          return fetch(APPS_SCRIPT_URL);
+        case 2:
+          res = _context6.v;
+          if (res.ok) {
+            _context6.n = 3;
+            break;
+          }
+          throw new Error("Apps Script HTTP " + res.status);
+        case 3:
+          _context6.n = 4;
+          return res.json();
+        case 4:
+          json = _context6.v;
+          if (!json.error) {
+            _context6.n = 5;
+            break;
+          }
+          throw new Error(json.error);
+        case 5:
+          headers = json.headers || [];
+          rows = json.stocks || [];
+          if (rows.length) {
+            _context6.n = 6;
+            break;
+          }
+          throw new Error("Sheet में कोई data नहीं मिला");
+        case 6:
+          findCol = function findCol() {
+            for (var _len2 = arguments.length, names = new Array(_len2), _key2 = 0; _key2 < _len2; _key2++) {
+              names[_key2] = arguments[_key2];
+            }
+            var _loop = function _loop() {
+                var n = _names[_i3];
+                var k = headers.find(function (h) {
+                  return String(h).toLowerCase().replace(/\s+/g, "") === n.toLowerCase().replace(/\s+/g, "");
+                });
+                if (k) return {
+                  v: k
+                };
+              },
+              _ret;
+            for (var _i3 = 0, _names = names; _i3 < _names.length; _i3++) {
+              _ret = _loop();
+              if (_ret) return _ret.v;
+            }
+            var _loop2 = function _loop2() {
+                var n = _names2[_i4];
+                var k = headers.find(function (h) {
+                  return String(h).toLowerCase().includes(n.toLowerCase());
+                });
+                if (k) return {
+                  v: k
+                };
+              },
+              _ret2;
+            for (var _i4 = 0, _names2 = names; _i4 < _names2.length; _i4++) {
+              _ret2 = _loop2();
+              if (_ret2) return _ret2.v;
+            }
+            return null;
+          };
+          symCol = findCol("symbol", "sym", "ticker", "stock", "scrip", "nsecode");
+          nameCol = findCol("name", "company", "stockname", "description");
+          suitCol = findCol("suitable", "darvas", "boh", "flag", "status");
+          if (symCol) {
+            _context6.n = 7;
+            break;
+          }
+          throw new Error("\"Symbol\" column \u0928\u0939\u0940\u0902 \u092E\u093F\u0932\u093E\u0964 \u092E\u093F\u0932\u0947: ".concat(headers.join(", ")));
+        case 7:
+          stocks = rows.map(function (r) {
+            return {
+              sym: String(r[symCol] || "").trim().toUpperCase().replace(/\.NS$|^NSE:/i, ""),
+              name: String(r[nameCol] || r[symCol] || "").trim(),
+              sheetSuitable: suitCol ? r[suitCol] : null
+            };
+          }).filter(function (s) {
+            return s.sym && /^[A-Z0-9&\-]+$/.test(s.sym);
+          });
+          if (stocks.length) {
+            _context6.n = 8;
+            break;
+          }
+          throw new Error("Sheet में valid symbol नहीं मिला");
+        case 8:
+          return _context6.a(2, {
+            stocks: stocks,
+            cols: headers,
+            totalRows: rows.length
+          });
+      }
+    }, _callee6);
+  }));
+  return _fetchSheetStocks.apply(this, arguments);
+}
+function fetchYahooOHLC(_x2) {
+  return _fetchYahooOHLC.apply(this, arguments);
+}
+/* ================================================================
+   BOH FILTER
+   ================================================================ */
+function _fetchYahooOHLC() {
+  _fetchYahooOHLC = _asyncToGenerator(/*#__PURE__*/_regenerator().m(function _callee7(symbol) {
+    var _json$chart, _result$indicators;
+    var range,
+      interval,
+      ySym,
+      yUrl,
+      res,
+      json,
+      result,
+      ts,
+      q,
+      rows,
+      i,
+      _q$open,
+      _q$high,
+      _q$low,
+      _q$close,
+      _q$volume,
+      o,
+      h,
+      l,
+      c,
+      v,
+      _args7 = arguments;
+    return _regenerator().w(function (_context7) {
+      while (1) switch (_context7.n) {
+        case 0:
+          range = _args7.length > 1 && _args7[1] !== undefined ? _args7[1] : DEFAULT_RANGE;
+          interval = _args7.length > 2 && _args7[2] !== undefined ? _args7[2] : "1d";
+          ySym = symbol.toUpperCase() + ".NS";
+          yUrl = "https://query1.finance.yahoo.com/v8/finance/chart/".concat(ySym, "?range=").concat(range, "&interval=").concat(interval);
+          _context7.n = 1;
+          return fetchWithFallback(yUrl);
+        case 1:
+          res = _context7.v;
+          _context7.n = 2;
+          return res.json();
+        case 2:
+          json = _context7.v;
+          result = json === null || json === void 0 || (_json$chart = json.chart) === null || _json$chart === void 0 || (_json$chart = _json$chart.result) === null || _json$chart === void 0 ? void 0 : _json$chart[0];
+          if (result) {
+            _context7.n = 3;
+            break;
+          }
+          throw new Error("कोई data नहीं मिला");
+        case 3:
+          ts = result.timestamp || [];
+          q = ((_result$indicators = result.indicators) === null || _result$indicators === void 0 || (_result$indicators = _result$indicators.quote) === null || _result$indicators === void 0 ? void 0 : _result$indicators[0]) || {};
+          rows = [];
+          i = 0;
+        case 4:
+          if (!(i < ts.length)) {
+            _context7.n = 7;
+            break;
+          }
+          o = (_q$open = q.open) === null || _q$open === void 0 ? void 0 : _q$open[i], h = (_q$high = q.high) === null || _q$high === void 0 ? void 0 : _q$high[i], l = (_q$low = q.low) === null || _q$low === void 0 ? void 0 : _q$low[i], c = (_q$close = q.close) === null || _q$close === void 0 ? void 0 : _q$close[i], v = ((_q$volume = q.volume) === null || _q$volume === void 0 ? void 0 : _q$volume[i]) || 0;
+          if (!(o == null || h == null || l == null || c == null)) {
+            _context7.n = 5;
+            break;
+          }
+          return _context7.a(3, 6);
+        case 5:
+          rows.push({
+            date: new Date(ts[i] * 1000),
+            open: o,
+            high: h,
+            low: l,
+            close: c,
+            vol: v,
+            ts: ts[i] * 1000
+          });
+        case 6:
+          i++;
+          _context7.n = 4;
+          break;
+        case 7:
+          rows.sort(function (a, b) {
+            return a.ts - b.ts;
+          });
+          if (!(rows.length < 30)) {
+            _context7.n = 8;
+            break;
+          }
+          throw new Error("कम data (" + rows.length + " rows)");
+        case 8:
+          return _context7.a(2, rows);
+      }
+    }, _callee7);
+  }));
+  return _fetchYahooOHLC.apply(this, arguments);
+}
+function checkBOH(rows) {
+  var _rows$Math$max;
+  if (!rows || rows.length < 60) {
+    return {
+      suitable: false,
+      reason: "Data kam",
+      cmp: null,
+      high52: null,
+      low52: null,
+      pctFromLow: null,
+      pctFromHigh: null,
+      pct1M: null
     };
   }
-  let pendingGtt = null;
-  if (gttActive) {
-    const last = enriched[enriched.length - 1];
-    pendingGtt = { price: last.d20H, date: last.date };
-  }
-  return { rows: enriched, trades: trades, openPosition: openPosition, pendingGtt: pendingGtt, fixedAmount: fixedAmount };
-}
-
-function calcPortfolioStats(stocks) {
-  if (!stocks || !stocks.length) return null;
-  var totalTrades=0, wins=0, losses=0, grossWin=0, grossLoss=0;
-  var heldDays=0, openCount=0, gttCount=0, idleCount=0;
-  var totalInvestedRs=0, totalProfitRs=0, totalReturnedRs=0;
-  var perStock = [];
-  for (var i = 0; i < stocks.length; i++) {
-    var s = stocks[i];
-    var t = s.trades || [];
-    var w=0, l=0, sw=0, sl=0, d=0;
-    var investedRs=0, returnedRs=0, profitRs=0;
-    for (var j = 0; j < t.length; j++) {
-      var tr = t[j];
-      if (tr.pnl > 0) { w++; sw += tr.pct; } else { l++; sl += Math.abs(tr.pct); }
-      d += (tr.days || 0);
-      investedRs += tr.cost;
-      returnedRs += tr.proceeds;
-      profitRs += tr.pnl;
-    }
-    totalTrades += t.length; wins += w; losses += l;
-    grossWin += sw; grossLoss += sl; heldDays += d;
-    totalInvestedRs += investedRs; totalReturnedRs += returnedRs; totalProfitRs += profitRs;
-    var status = s.openPosition ? "HOLDING" : (s.pendingGtt ? "GTT" : "IDLE");
-    if (s.openPosition) openCount++; else if (s.pendingGtt) gttCount++; else idleCount++;
-    var lastRow = s.rows && s.rows.length ? s.rows[s.rows.length - 1] : null;
-    perStock.push({
-      name: s.name, trades: t.length, wins: w, losses: l,
-      winRate: t.length ? (w / t.length) * 100 : 0,
-      avgWin: w ? sw / w : 0, avgLoss: l ? sl / l : 0,
-      netPct: sw - sl, status: status,
-      lastClose: lastRow ? lastRow.close : null,
-      amount: s.amount || DEFAULT_FIXED_AMOUNT,
-      investedRs: investedRs, returnedRs: returnedRs, profitRs: profitRs,
-      buysOpen: s.openPosition ? s.openPosition.numBuys : 0
-    });
-  }
-  var winRate = totalTrades ? (wins / totalTrades) * 100 : 0;
-  var avgWin = wins ? grossWin / wins : 0;
-  var avgLoss = losses ? grossLoss / losses : 0;
-  var profitFactor = grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : 0);
-  var expectancy = totalTrades ? ((wins / totalTrades) * avgWin - (losses / totalTrades) * avgLoss) : 0;
-  return {
-    totalStocks: stocks.length, totalTrades: totalTrades,
-    wins: wins, losses: losses, winRate: winRate,
-    avgWin: avgWin, avgLoss: avgLoss, grossWin: grossWin, grossLoss: grossLoss,
-    netPct: grossWin - grossLoss, profitFactor: profitFactor, expectancy: expectancy,
-    openCount: openCount, gttCount: gttCount, idleCount: idleCount,
-    avgHeldDays: totalTrades ? heldDays / totalTrades : 0,
-    totalInvestedRs: totalInvestedRs, totalReturnedRs: totalReturnedRs, totalProfitRs: totalProfitRs,
-    perStock: perStock
-  };
-}
-
-function calcEquityCurve(stocks) {
-  if (!stocks || !stocks.length) return null;
-  var allTrades = [];
-  for (var i = 0; i < stocks.length; i++) {
-    var s = stocks[i];
-    (s.trades || []).forEach(function(t){
-      allTrades.push({
-        ts: t.exitDate.getTime(), date: t.exitDate, profit: t.pnl,
-        stock: s.name, entry: t.buys[0].price, exit: t.exit,
-        shares: t.shares, numBuys: t.numBuys
-      });
-    });
-  }
-  if (!allTrades.length) return null;
-  allTrades.sort(function(a,b){ return a.ts - b.ts; });
-  var pts = []; var cum=0, peak=0, maxDD=0, maxDDPeak=0, maxDDTrough=0;
-  for (var k = 0; k < allTrades.length; k++) {
-    cum += allTrades[k].profit;
-    if (cum > peak) peak = cum;
-    var dd = peak - cum;
-    if (dd > maxDD) { maxDD = dd; maxDDPeak = peak; maxDDTrough = cum; }
-    pts.push({ ts: allTrades[k].ts, date: allTrades[k].date, profit: allTrades[k].profit, cum: cum, peak: peak, dd: dd, stock: allTrades[k].stock });
-  }
-  return { points: pts, allTrades: allTrades, maxDrawdown: maxDD, peakEquity: peak, finalEquity: cum, totalProfit: cum, tradeCount: allTrades.length, maxDDPeak: maxDDPeak, maxDDTrough: maxDDTrough };
-}
-
-function calcScreenerRow(stock) {
-  var rows = stock.rows;
-  var last = rows[rows.length - 1];
-  var status = "IDLE", label = "⏳ IDLE", priority = 4, detail = "";
-  if (stock.openPosition) {
-    status = "HOLDING"; label = "📈 HOLDING"; priority = 2;
-    var op = stock.openPosition;
-    detail = "Buys " + op.numBuys + "/" + MAX_BUYS + " · Avg ₹" + fmtN(op.avgPrice) + " → T ₹" + fmtN(op.target) + " (" + (op.targetPct*100).toFixed(0) + "%)";
-  } else if (stock.pendingGtt) {
-    status = "GTT"; label = "🔔 GTT Active"; priority = 3;
-    detail = "GTT @ ₹" + fmtN(stock.pendingGtt.price);
-  }
-  for (var i = rows.length - 1; i >= Math.max(0, rows.length - 10); i--) {
-    var r = rows[i];
-    var re = r.events || [];
-    var buyEv = re.find(function(e){ return /^buy/.test(e); });
-    if (buyEv) {
-      var ago = rows.length - 1 - i;
-      if (ago <= 1) {
-        status = "BUY_TODAY"; label = "✅ " + (buyEv==="buy"?"BUY":("BUY" + buyEv.slice(3))); priority = 0;
-        detail = buyEv + " @ ₹" + fmtN(r.buyPrice) + " × " + r.buyQty + " (" + (ago === 0 ? "आज" : "कल") + ")";
-      }
-      break;
-    }
-    if (re.indexOf("target") >= 0) {
-      var ago2 = rows.length - 1 - i;
-      if (ago2 <= 1) { status = "TARGET_TODAY"; label = "🎯 TARGET"; priority = 0; detail = "Target hit (" + (ago2 === 0 ? "आज" : "कल") + ")"; }
-      break;
-    }
-    if (re.indexOf("gtt-placed") >= 0) {
-      var ago3 = rows.length - 1 - i;
-      if (ago3 <= 1 && status === "IDLE") { status = "NEW_LOW"; label = "🆕 New Low"; priority = 1; detail = "नया Low → GTT लगा"; }
-      break;
-    }
-  }
-  if (last.newLow && !stock.openPosition && stock.pendingGtt) {
-    status = "NEW_LOW"; label = "🆕 New Low"; priority = 1;
-    detail = "आज नया Low → GTT @ ₹" + fmtN(stock.pendingGtt.price);
-  }
-  return {
-    name: stock.name, status: status, label: label, priority: priority, detail: detail,
-    close: last.close, d20H: last.d20H, d20L: last.d20L, date: last.date,
-    gtt: stock.pendingGtt ? stock.pendingGtt.price : null,
-    target: stock.openPosition ? stock.openPosition.target : nu
+  var last252 = rows.slice(-252);
+ 
